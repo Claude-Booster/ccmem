@@ -22,6 +22,8 @@ GATES_DIR = Path(__file__).resolve().parent
 
 # (module, min_phase, one-line purpose)
 REGISTRY = [
+    # Phase 0 gate
+    ("gate_scaffold",         0, "ccmem importable from repo; pytest collects; no stale test DB; no old schema names; config hook names match DESIGN.md"),
     # Phase 1 gates
     ("gate_schema_contract",  1, "every table and column in DESIGN.md schema exists after migration"),
     ("gate_hook_contract",    1, "hooks never block, never crash, correct event shape"),
