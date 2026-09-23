@@ -342,35 +342,46 @@ interactive session test to verify sigil preservation.
 ## §11 — Python hook startup cost on Windows / OneDrive
 
 `status: verified` — measured 2026-09-23, v2.1.278, Windows 11 Enterprise, Python 3.14.3,
-project directory on OneDrive (network-backed).
+project directory on OneDrive - <org> (network-backed, sync filter driver active).
 
-**Method:** 20 runs of `subprocess.run([sys.executable, '-c', 'pass'], capture_output=True)`
-from within a running Python process — the same spawn path gates use. This is the
-irreducible floor: every ccmem hook on every Claude Code event pays this cost.
+**Method:** `subprocess.run([sys.executable, '-c', 'pass'], capture_output=True)` x20 from
+a running Python process — the same spawn path gates use. Three states measured:
 
-| Metric | Value |
-|---|---|
-| Min | 403ms |
-| Median | 534ms |
-| Max | 618ms |
+| State | Min | p50 | p90 | Max |
+|---|---|---|---|---|
+| Quiet session (no recent commits) | 403ms | 534ms | — | 618ms |
+| Active OneDrive sync (post-commit) | 1343ms | 1707ms | 1930ms | 2640ms |
+| Full gate run under load (many concurrent spawns) | — | ~2500ms | — | 4600ms |
 
-**Stop hook own work** (hook logic separate from startup): ~55ms. Measured by comparing
-`Stop` hook elapsed time against the floor with `CCMEM_THRESHOLD=0` and a live DB
-(forcing the capture + enqueue path to run). Module imports + JSON parse + DB connect
-+ insert + commit cost ~55ms. Interpreter startup cost is ~10× the logic cost.
+**Root-cause finding (2026-09-23):** The floor elevation during active sync is
+**system-wide, not limited to OneDrive file reads**. Controlled comparison:
+- `python -c pass` (no script file): p50=1730ms, max=2640ms during sync
+- Script in `%LOCALAPPDATA%` (outside OneDrive): p50=2526ms, max=4358ms — equal or worse
+- Hook in OneDrive repo: p50=1740ms, max=2488ms
 
-**Import overhead:** Hooks import `json`, `os`, `sys` at module level before reaching the
-`CCMEM_DISABLED` check. This adds ~50ms above `python -c pass`. The kill-switch threshold
-in `gate_hook_contract.py` is therefore `interpreter_floor_ms + 200ms` (200ms = 50ms import
-overhead + 150ms margin to catch real I/O before short-circuit). The floor is stored in
-`gates/config.json` so it can be updated when re-measured or on different hardware.
+Scripts in `%LOCALAPPDATA%` show similar or higher variance. Moving hook scripts
+outside the sync boundary does NOT fix the problem. Likely cause: Windows Defender
+scanning newly committed Python files, creating system-wide process-creation overhead
+on every `subprocess.run` regardless of where the script lives.
 
-**Phase 4 implication:** If the startup cost is unacceptable (≥500ms added to every
-Stop hook call = ≥500ms latency added to every Claude turn), a native shim becomes
-necessary. The shim would be a compiled binary that: checks `CCMEM_DISABLED`, reads
-stdin, and hands off to a pre-warmed Python worker (daemon) or directly calls a
-C-extension. Until the startup cost is confirmed user-noticeable via PHASE1-NOTES.md
-feedback, this remains a Phase 4 item, not a prerequisite.
+**Stop hook own work** (hook logic separate from startup): ~55ms. Measured with
+`CCMEM_THRESHOLD=0` and a live DB (capture + enqueue path). Module imports + JSON
+parse + DB connect + insert + commit = ~55ms. Interpreter startup is ~10× the logic cost
+in the quiet state; during active sync, startup dominates even more (1707ms vs 55ms).
+
+**Gate thresholds** (`gates/config.json`):
+- `interpreter_floor_ms`: 1700 (active sync p50 — when the gate is most likely run)
+- `kill_switch_headroom_ms`: 800 (imports + load amplification during full gate runs)
+- `budget_ms`: raised to p90 syncing-state totals; see config.json `_comment` field
+
+**Phase 4 shim analysis:** Moving scripts outside the sync boundary is NOT the fix
+(overhead is system-wide). A pre-warmed Python daemon avoids subprocess creation per
+turn entirely — IPC to a resident daemon costs ~5ms vs 1700ms+ spawn. The daemon itself
+can live in `%LOCALAPPDATA%\ccmem\` (outside OneDrive) to minimize its own startup cost,
+but the per-turn saving comes from avoiding spawns, not from file location. A native
+binary shim would also help startup for the daemon launch but would still be scanned by
+Defender and not avoid the per-turn spawn cost without the daemon pattern.
+See `docs/PLAN.md` Phase 4 section for the decision gate (depends on PHASE1-NOTES.md).
 
 ---
 

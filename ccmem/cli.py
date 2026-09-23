@@ -170,6 +170,20 @@ def cmd_doctor(args):
         print("FAIL: Set CCMEM_HOME to a local path, e.g. %LOCALAPPDATA%\\ccmem", file=sys.stderr)
         sys.exit(1)
 
+    # Check whether the hook scripts themselves live inside a sync boundary.
+    # Hooks in OneDrive pay ~3-5x interpreter startup cost during active sync
+    # because the OS filter driver intercepts every subprocess spawn. This does
+    # not break correctness but degrades Stop hook latency on every turn.
+    hooks_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks")
+    hooks_sync = sync_root_for(hooks_dir)
+    if hooks_sync:
+        print(f"WARN: hook scripts are inside a sync root: {hooks_sync}")
+        print(f"WARN: hooks dir: {hooks_dir}")
+        print("WARN: subprocess spawn cost is 3-5x higher during active sync.")
+        print("WARN: Consider installing ccmem as a proper plugin (hooks land in ~/.claude/plugins, outside sync).")
+    else:
+        print(f"hooks dir: {hooks_dir}  (outside sync boundary)")
+
     if not db_path.exists():
         print("Run: python -m ccmem.cli add ... to create it.")
         return

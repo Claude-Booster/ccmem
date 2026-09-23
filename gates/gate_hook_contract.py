@@ -142,11 +142,15 @@ def main() -> int:
                 r.ok("UserPromptSubmit: never exits 2", "1MB prompt handled")
 
         # --- kill switch -------------------------------------------------
-        # Threshold: interpreter_floor_ms + 150ms headroom. The floor is the cost
-        # of spawning python at all on this machine; anything beyond that budget is
-        # real work done before the CCMEM_DISABLED check — which is the bug.
+        # Threshold: interpreter_floor_ms + kill_switch_headroom_ms.
+        # The floor is the cost of spawning python on this machine (includes
+        # OS process-creation overhead and Defender/sync filter scans).
+        # Headroom covers stdlib imports before the CCMEM_DISABLED check plus
+        # load amplification when the full gate suite runs multiple spawns
+        # concurrently. See config.json comments and FACTS.md §11.
         floor = cfg.get("interpreter_floor_ms", 300)
-        kill_threshold = floor + 200  # 200ms: floor is python -c pass; hooks add ~50ms of stdlib imports before the check
+        headroom = cfg.get("kill_switch_headroom_ms", 200)
+        kill_threshold = floor + headroom
         off = run_hook(cfg, event, base_payload(event), env_extra={"CCMEM_DISABLED": "1"})
         if off.returncode != 0:
             r.fail(f"{event}: kill switch exits 0", f"rc={off.returncode}")
@@ -155,7 +159,7 @@ def main() -> int:
         elif off.elapsed_ms > kill_threshold:
             r.fail(
                 f"{event}: kill switch is fast",
-                f"{off.elapsed_ms:.0f}ms > floor({floor})+200={kill_threshold}ms "
+                f"{off.elapsed_ms:.0f}ms > floor({floor})+headroom({headroom})={kill_threshold}ms "
                 "-- should short-circuit before any I/O",
             )
         else:
