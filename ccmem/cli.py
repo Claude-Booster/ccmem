@@ -10,7 +10,9 @@ from pathlib import Path
 
 def _db(args):
     from ccmem.db import connect, migrate
-    home = os.environ.get("CCMEM_HOME", str(Path.home() / ".claude" / "ccmem"))
+    from ccmem.paths import maybe_migrate, resolve_home
+    home = resolve_home()
+    maybe_migrate(home)
     Path(home).mkdir(parents=True, exist_ok=True)
     path = Path(home) / "mem.db"
     con = connect(str(path))
@@ -154,10 +156,20 @@ def cmd_inject(args):
 
 
 def cmd_doctor(args):
-    home = os.environ.get("CCMEM_HOME", str(Path.home() / ".claude" / "ccmem"))
+    from ccmem.paths import resolve_home, sync_root_for
+    home = resolve_home()
     db_path = Path(home) / "mem.db"
-    print(f"DB path:   {db_path}")
-    print(f"DB exists: {db_path.exists()}")
+    print(f"CCMEM_HOME: {home}")
+    print(f"DB path:    {db_path}")
+    print(f"DB exists:  {db_path.exists()}")
+
+    sync_root = sync_root_for(home)
+    if sync_root:
+        print(f"FAIL: CCMEM_HOME is inside a cloud sync root: {sync_root}", file=sys.stderr)
+        print("FAIL: SQLite WAL mode is unsafe inside OneDrive/Dropbox/iCloud/Google Drive.", file=sys.stderr)
+        print("FAIL: Set CCMEM_HOME to a local path, e.g. %LOCALAPPDATA%\\ccmem", file=sys.stderr)
+        sys.exit(1)
+
     if not db_path.exists():
         print("Run: python -m ccmem.cli add ... to create it.")
         return

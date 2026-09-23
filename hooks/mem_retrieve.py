@@ -22,13 +22,15 @@ def main() -> None:
     try:
         from ccmem.capture import extract_sigil
         from ccmem.db import connect, migrate
+        from ccmem.paths import maybe_migrate, resolve_home
         from ccmem.redact import redact
         from ccmem.render import render
         from ccmem.retrieval import retrieve
         from ccmem.scoping import project_key, resolve_project_root
         from ccmem.supersession import maybe_supersede
 
-        home = os.environ.get("CCMEM_HOME", os.path.join(os.path.expanduser("~"), ".claude", "ccmem"))
+        home = resolve_home()
+        maybe_migrate(home)
         db_path = os.path.join(home, "mem.db")
 
         prompt = payload.get("prompt", "")

@@ -26,8 +26,10 @@ def main() -> None:
     try:
         from ccmem.capture import enqueue_candidate, score_turn
         from ccmem.db import connect
+        from ccmem.paths import maybe_migrate, resolve_home
 
-        home = os.environ.get("CCMEM_HOME", os.path.join(os.path.expanduser("~"), ".claude", "ccmem"))
+        home = resolve_home()
+        maybe_migrate(home)
         db_path = os.path.join(home, "mem.db")
         if not os.path.exists(db_path):
             return

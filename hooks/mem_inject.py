@@ -19,11 +19,13 @@ def main() -> None:
 
     try:
         from ccmem.db import connect, migrate
+        from ccmem.paths import maybe_migrate, resolve_home
         from ccmem.render import render
         from ccmem.retrieval import mark_accessed, retrieve
         from ccmem.scoping import project_key, resolve_project_root
 
-        home = os.environ.get("CCMEM_HOME", os.path.join(os.path.expanduser("~"), ".claude", "ccmem"))
+        home = resolve_home()
+        maybe_migrate(home)
         db_path = os.path.join(home, "mem.db")
         if not os.path.exists(db_path):
             return
