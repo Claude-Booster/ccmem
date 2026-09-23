@@ -67,11 +67,32 @@ def _require_hook(name: str) -> Path:
     return path
 
 
+def _default_timeout_s() -> float:
+    """Derive test timeout from gate budget + 50% headroom (in seconds).
+
+    Gate budget_ms values are observed p90 under active sync. The extra
+    50% absorbs load amplification when the full suite runs concurrently.
+    Falls back to 15s if config is missing.
+    """
+    import json as _json
+    cfg_path = REPO / "gates" / "config.json"
+    try:
+        cfg = _json.loads(cfg_path.read_text())
+        budgets = [v for v in cfg.get("budget_ms", {}).values() if isinstance(v, (int, float))]
+        max_budget_ms = max(budgets) if budgets else 6000
+        return (max_budget_ms * 1.5) / 1000
+    except Exception:
+        return 15.0
+
+
+_TIMEOUT_S = _default_timeout_s()
+
+
 def _run(
     hook_path: Path,
     payload: bytes,
     env_extra: dict | None = None,
-    timeout: float = 5.0,
+    timeout: float = _TIMEOUT_S,
 ) -> tuple[subprocess.CompletedProcess, float]:
     env = os.environ.copy()
     # Default CCMEM_HOME — tests that need isolation override via env_extra.

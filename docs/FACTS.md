@@ -484,15 +484,51 @@ only 315ms to the Stop timeout (5000ms).
 p50=4685ms against 5s timeout — marginal. Apply both Defender path exclusions → ~2038ms,
 comfortable headroom.
 
-**With exclusions, is daemon still needed?** Yes, for two reasons:
-1. p90 even with exclusions is ~3024ms estimated (1677ms × 1.8). Spikes still possible.
-2. The paused-OneDrive floor (not yet measured) will determine the best-case; if it is
-   < 300ms, exclusions + no-spawn is the story. If it is still > 800ms, spawn cost is
-   irreducible.
+### Paused-OneDrive measurement (2026-09-23)
 
-**Daemon trigger threshold (preliminary):** Gate on `median(Stop.duration_ms) > X` from
-hook_log after 50 real sessions. X will be set after paused-OneDrive measurement
-establishes the no-sync floor. See `docs/PLAN.md` Phase 4.
+Sync paused from system tray; 12 runs each. Note: OneDrive was still actively syncing
+when the script started and only fully paused mid-run for the production path test.
+
+| Metric | Runs 1-9 | Runs 10-12 (truly paused) | p50 all |
+|---|---|---|---|
+| Gate path [list, no shell] | 5839-8046ms | — | **6580ms** |
+| Production path [string, shell=True] | 10871-25327ms | 2712-3926ms | — |
+| Interpreter floor (`-c pass`) | 1107-1751ms | consistent | **1333ms** |
+
+**Key finding — paused ≠ quiet.** The filter driver overhead persists even with sync
+paused. Interpreter floor paused (1333ms) ≈ active sync (1707ms). The sync activity
+itself contributes only ~370ms; the driver interception is always present.
+
+**Gate-path with CCMEM_DISABLED is anomalously high (6580ms ≈ active-sync 2636ms).** The
+~5250ms gap above interpreter floor is Defender scanning `mem_capture.py` on read
+from OneDrive. Defender exclusions (which we reverted after testing) eliminated this cost.
+
+**Production path truly paused (runs 10-12): 2712-3926ms.** This is the OneDrive-paused
+best-case for production hooks without Defender exclusions. It matches gate-path
+active-sync (2636ms) closely — the production overhead (shell) ≈ the sync overhead.
+
+**With exclusions (37% saving) + paused sync:**
+estimated ~2712ms × 0.63 ≈ **~1700ms** production floor. This is near the hook budget
+and well inside the 5s Stop timeout.
+
+**With exclusions + hooks installed outside OneDrive (proper plugin path):**
+estimated ~534ms (quiet floor) + shell overhead ≈ **~900ms** production floor. This is
+the target architecture. Plugin install at `~/.claude/plugins` puts hooks outside the
+sync boundary entirely.
+
+**With exclusions, is daemon still needed?** Probably not for correctness — 1700ms is
+well under the 5s timeout. But for user experience, 1700ms per turn is noticeable
+latency. The daemon eliminates spawns entirely (sub-millisecond per turn). Decision: defer
+to Phase 4, gate on real hook_log data showing sustained elevation.
+
+**Daemon trigger thresholds (set 2026-09-23, before real data):**
+Stored in `gates/config.json → daemon_trigger`. See that file for rationale.
+- `spawn_warn_ms=1000`: persistent p50 above this → recommend Defender exclusions
+- `spawn_daemon_ms=2500`: persistent p50 above this → recommend daemon
+- `duration_warn_ms=200`: within-Python p50 above this → DB performance issue
+- `min_hook_events=20`: minimum hook_log entries before any recommendation fires
+
+These thresholds are set from synthetic measurements. Revisit after 50+ real sessions.
 
 ---
 

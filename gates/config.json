@@ -7,7 +7,7 @@
     "PreCompact": "hooks/mem_snapshot.py"
   },
   "budget_ms": {
-    "_comment": "Budget includes interpreter startup. During active OneDrive sync + Defender scanning, startup alone consumes 1700ms+ (see interpreter_floor_ms). Values here are the p90 syncing-state total observed 2026-09-23.",
+    "_comment": "Budget for gate path [sys.executable, script] — no shell, real Python. During active OneDrive sync + Defender scanning, startup alone consumes 1700ms+. Values are p90 syncing-state gate-path totals observed 2026-09-23. Production path (shell=True) runs 1.8x slower — see FACTS.md §11.",
     "SessionStart": 6000,
     "UserPromptSubmit": 6000,
     "Stop": 4000,
@@ -19,8 +19,19 @@
   "topk_cap": 12,
   "injection_marker": "<ccmem-memories>",
   "memory_line_prefix": "- ",
-  "_comment_interpreter_floor": "Measured 2026-09-23 on Windows 11 / OneDrive (<org>) / Python 3.14.3. Method: subprocess.run([sys.executable, '-c', 'pass']) x20 from a running Python process — same spawn method as gates. Three states measured: (1) previous quiet session: min=403ms median=534ms max=618ms. (2) Active OneDrive sync post-commit: min=1343ms p50=1707ms p90=1930ms max=2640ms. (3) Full gate run under load: observed up to 4591ms. Root-cause finding: the floor elevation is system-wide — scripts in %LOCALAPPDATA% show similar or higher variance, so OneDrive file-read latency is NOT the bottleneck. Likely cause: Windows Defender scanning newly committed Python files. See FACTS.md §11.",
+  "_comment_interpreter_floor": "Measured 2026-09-23 on Windows 11 / OneDrive (<org>) / Python 3.14.3. Method: subprocess.run([sys.executable, '-c', 'pass']). States: (1) quiet/idle: p50=534ms. (2) active OneDrive sync: p50=1707ms. (3) OneDrive paused (sync paused from tray): p50=1333ms — filter driver overhead persists even when sync is paused, because the driver intercepts file reads regardless of sync state. Running hook scripts from OneDrive costs ~5s additional when Defender scans the script file on first read — 6580ms gate-path vs 1333ms floor. Defender path exclusions (hooks-dir + Lib) reduce this to 1132ms during active sync (-37%). See FACTS.md §11.",
   "interpreter_floor_ms": 1700,
-  "_comment_kill_switch_headroom": "Added to interpreter_floor_ms to get kill_threshold. 200ms covers stdlib imports (json/os/sys) before the CCMEM_DISABLED check. Extra headroom absorbs load amplification when running the full gate suite: multiple concurrent spawns drive system load higher than single-measurement floor. Total formula: floor(1700) + headroom(800) = 2500ms.",
-  "kill_switch_headroom_ms": 800
+  "_comment_kill_switch_headroom": "Added to interpreter_floor_ms to get kill_threshold. 800ms covers stdlib imports (json/os/sys) plus Defender scan headroom. Total: floor(1700) + headroom(800) = 2500ms.",
+  "kill_switch_headroom_ms": 800,
+  "_comment_daemon_trigger": "Thresholds for the Phase 4 daemon (pre-warmed Python process). spawn_warn_ms and spawn_daemon_ms are checked by 'doctor' via subprocess.run([sys.executable, '-c', 'pass']) x5; use p50. duration_warn_ms checks hook_log.duration_ms (within-Python time only — does NOT include spawn). min_hook_events: don't trigger recommendations until this many real hook_log entries exist.",
+  "daemon_trigger": {
+    "spawn_warn_ms": 1000,
+    "_comment_spawn_warn": "p50 spawn floor above this → recommend Defender path exclusions. Rationale: 1000ms is well above quiet-state (534ms) but below active-sync-with-Defender (1700ms). Persistent elevation above 1000ms means something is adding overhead.",
+    "spawn_daemon_ms": 2500,
+    "_comment_spawn_daemon": "p50 spawn floor above this → recommend daemon. Rationale: 2500ms = interpreter_floor + kill_switch_headroom. If every spawn costs this much, spawning is the dominant cost and a pre-warmed process eliminates it.",
+    "duration_warn_ms": 200,
+    "_comment_duration_warn": "hook_log.duration_ms p50 above this → DB or retrieval is unusually slow (separate from spawn cost). Normal within-Python work is 50-100ms; 200ms suggests a problem.",
+    "min_hook_events": 20,
+    "_comment_min_events": "Minimum hook_log entries before any recommendation fires. Avoids triggering on cold-start outliers."
+  }
 }
