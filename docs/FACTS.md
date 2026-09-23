@@ -344,8 +344,24 @@ interactive session test to verify sigil preservation.
 `status: verified` — measured 2026-09-23, v2.1.278, Windows 11 Enterprise, Python 3.14.3,
 project directory on OneDrive - <org> (network-backed, sync filter driver active).
 
-**Method:** `subprocess.run([sys.executable, '-c', 'pass'], capture_output=True)` x20 from
-a running Python process — the same spawn path gates use. Three states measured:
+### Two executables: Windows Store stub vs real Python
+
+`python` on PATH resolves to `C:\...\WindowsApps\python.exe` — the **Windows Store app
+stub**, not the real interpreter (`C:\...\AppData\Local\Python\pythoncore-3.14-64\python.exe`).
+The stub re-launches the real interpreter, creating two OS-level processes per hook spawn.
+
+**Critical calibration gap (discovered 2026-09-23):** `gates/_common.py` uses
+`sys.executable` to run hooks, which within a running Python process is always the
+real interpreter. Production hooks in `~/.claude/settings.json` use `"command": "python
+\"hook.py\""` which goes through the Store stub. **The gates have been measuring the
+real interpreter; production hooks pay Store stub overhead on top.**
+
+### Measured costs (2026-09-23)
+
+All measurements use `subprocess.run(cmd, input=b"{}", capture_output=True)` — the same
+call path as the gates.
+
+**Real Python (`sys.executable`) — what gates measure:**
 
 | State | Min | p50 | p90 | Max |
 |---|---|---|---|---|
@@ -353,35 +369,74 @@ a running Python process — the same spawn path gates use. Three states measure
 | Active OneDrive sync (post-commit) | 1343ms | 1707ms | 1930ms | 2640ms |
 | Full gate run under load (many concurrent spawns) | — | ~2500ms | — | 4600ms |
 
-**Root-cause finding (2026-09-23):** The floor elevation during active sync is
-**system-wide, not limited to OneDrive file reads**. Controlled comparison:
-- `python -c pass` (no script file): p50=1730ms, max=2640ms during sync
-- Script in `%LOCALAPPDATA%` (outside OneDrive): p50=2526ms, max=4358ms — equal or worse
-- Hook in OneDrive repo: p50=1740ms, max=2488ms
+**Store stub vs real Python — what production hooks actually pay:**
 
-Scripts in `%LOCALAPPDATA%` show similar or higher variance. Moving hook scripts
-outside the sync boundary does NOT fix the problem. Likely cause: Windows Defender
-scanning newly committed Python files, creating system-wide process-creation overhead
-on every `subprocess.run` regardless of where the script lives.
+Measured under elevated load (post-measurement-batch, system stressed); absolute values
+are inflated ~6x but the ratio is the meaningful number:
 
-**Stop hook own work** (hook logic separate from startup): ~55ms. Measured with
-`CCMEM_THRESHOLD=0` and a live DB (capture + enqueue path). Module imports + JSON
-parse + DB connect + insert + commit = ~55ms. Interpreter startup is ~10× the logic cost
-in the quiet state; during active sync, startup dominates even more (1707ms vs 55ms).
+| Executable | p50 | Max | Ratio vs real |
+|---|---|---|---|
+| Store stub (`python`) | 15,665ms | 17,479ms | **4.7× real** |
+| Real Python (direct path) | 3,350ms | 3,630ms | 1× |
+| Real Python with `-S` | 3,661ms | 4,070ms | ~1× (no meaningful difference) |
 
-**Gate thresholds** (`gates/config.json`):
-- `interpreter_floor_ms`: 1700 (active sync p50 — when the gate is most likely run)
+Quiet-state stub cost estimate: 534ms × ~2–3× (load-test ratio under calmer conditions) =
+**~1,000–1,600ms per hook spawn** just for the Store stub overhead in quiet state.
+During active sync this is compounded further. This estimate will be replaced with a
+clean measurement once the system is freshly rebooted.
+
+### Findings on other hypotheses
+
+- **`-S` flag (skip site imports):** No improvement. `pywin32_bootstrap` (20ms, loaded via
+  `sitecustomize`) and total `site` startup (~58ms) are Python-side costs that do not
+  contribute meaningfully to the OS-level floor.
+- **PYTHONPATH:** Empty — not a factor.
+- **site-packages:** 17 entries only — not a factor.
+- **OneDrive file reads vs location:** Moving scripts outside OneDrive does NOT reduce
+  spawn cost. `%LOCALAPPDATA%` scripts show equal or higher variance. Cost is system-wide.
+- **Controlled Folder Access:** Audit mode (2), not blocking mode (1) — not a factor.
+- **Windows Defender:** Unconfirmed — requires admin to add/remove exclusions and test.
+  A test script is at `docs/scratchpad/test_defender_exclusion.ps1` (run elevated).
+
+### The fix (not yet applied, pending approval)
+
+Change hook commands in `~/.claude/settings.json` from `python "C:\...\hook.py"` to
+the full real Python path `C:\...\AppData\Local\Python\pythoncore-3.14-64\python.exe
+"C:\...\hook.py"`. This:
+- Bypasses the Store stub on every hook spawn
+- Aligns production with what the gates measure
+- Saves ~2–3× startup overhead in quiet state
+
+This is machine-specific; the full path must match `sys.executable` on the target
+machine. A setup helper or doctor check should capture and use `sys.executable` rather
+than hardcoding.
+
+### Stop hook own work
+
+~55ms (hook logic separate from startup). Measured with `CCMEM_THRESHOLD=0` and a live
+DB (capture + enqueue path). Module imports + JSON parse + DB connect + insert + commit.
+Interpreter startup is ~10× the logic cost in quiet state; during active sync, startup
+dominates even more.
+
+### Gate thresholds (`gates/config.json`)
+
+Calibrated to real-Python active-sync floor (534ms × ~3 = 1700ms). After the settings.json
+fix, production and gates will use the same executable, making these thresholds accurate.
+
+- `interpreter_floor_ms`: 1700 (active sync p50 — real Python)
 - `kill_switch_headroom_ms`: 800 (imports + load amplification during full gate runs)
 - `budget_ms`: raised to p90 syncing-state totals; see config.json `_comment` field
 
-**Phase 4 shim analysis:** Moving scripts outside the sync boundary is NOT the fix
-(overhead is system-wide). A pre-warmed Python daemon avoids subprocess creation per
-turn entirely — IPC to a resident daemon costs ~5ms vs 1700ms+ spawn. The daemon itself
-can live in `%LOCALAPPDATA%\ccmem\` (outside OneDrive) to minimize its own startup cost,
-but the per-turn saving comes from avoiding spawns, not from file location. A native
-binary shim would also help startup for the daemon launch but would still be scanned by
-Defender and not avoid the per-turn spawn cost without the daemon pattern.
-See `docs/PLAN.md` Phase 4 section for the decision gate (depends on PHASE1-NOTES.md).
+### Phase 4 analysis
+
+The daemon remains the right long-term answer for per-turn latency. Moving scripts
+outside the sync boundary is not the fix (overhead is system-wide). The Store stub fix
+above is the immediate win and should be done first; it reduces the quiet-state floor
+by 2–3× without any architectural change. Remaining overhead after the stub fix is
+attributable to Defender scanning (unconfirmed) and Windows process-creation overhead
+(irreducible without eliminating spawns). A pre-warmed Python daemon eliminates
+per-turn spawns entirely; that decision gates on PHASE1-NOTES.md data.
+See `docs/PLAN.md` Phase 4 section.
 
 ---
 
