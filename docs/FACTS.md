@@ -437,7 +437,23 @@ saved ~231ms on gate path → estimated gate ~1414ms, production **~2825ms** wit
 exclusions.
 
 **With both path exclusions in production (shell=True, active sync) — estimated:**
-~2825ms. Lib exclusion measured; hooks-dir exclusion not yet applied.
+~2825ms. Lib exclusion measured; hooks-dir exclusion deliberately skipped (see below).
+
+**hooks-dir exclusion: decided against (2026-09-23).**
+Saving: ~231ms off gate path → estimated production ~2825ms vs measured 3056ms.
+Not applied because the hooks directory (`ccmem\hooks\`) is a corporate-synced path
+containing live, frequently-edited code. A standing AV exception on actively-written
+code is a permanent security trade-off, not a one-time tuning step. The 231ms saving
+does not justify it. This decision should not be revisited unless production p50
+climbs materially above 3056ms.
+
+**Measured baseline (2026-09-23, Lib exclusion only):**
+- Floor (`python -c pass`): p50=1243ms, p90=1541ms
+- Gate (list, no shell): p50=1645ms, p90=1917ms
+- Production (shell=True, short path): p50=3056ms, p90=4085ms
+
+This is the reference point for all future latency comparisons. A post-change
+measurement more than 20% above these figures warrants investigation.
 
 **Setup recommendation:** add two Defender path exclusions:
 1. The hooks directory: `C:\...\ccmem\hooks` (or wherever hooks live after install)
