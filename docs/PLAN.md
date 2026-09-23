@@ -3094,3 +3094,21 @@ Phase 2 starts when:
 3. FTS5 recall has at least 3 real failing queries from your transcripts to justify embeddings
 
 Do not start Phase 2 until all three are true.
+
+---
+
+## Phase 4 prerequisite: native shim (re-evaluated from PHASE1-NOTES.md)
+
+**Measured 2026-09-23, Windows 11 Enterprise, Python 3.14.3, project on OneDrive:**
+
+| Component | Time |
+|-----------|------|
+| Python interpreter startup (`python -c pass`) | 534ms median (403–618ms range) |
+| Hook own work (imports + JSON parse + DB + commit) | ~55ms |
+| Total per Stop hook call | ~589ms |
+
+**Consequence:** Every Claude turn on this machine incurs ~589ms of hook overhead from the Stop event alone. The interpreter startup is 90% of the cost; the actual hook logic is ~10%.
+
+**Decision point:** If `docs/PHASE1-NOTES.md` reports that the 500ms+ latency is user-noticeable (sluggish turn handoff), the native shim moves from Phase 4 nice-to-have to Phase 4 prerequisite. The shim would keep a pre-warmed Python worker alive between turns, reducing per-turn cost to the ~55ms logic cost.
+
+Do not design the shim before reading PHASE1-NOTES.md. The numbers are real but whether the latency is *felt* depends on how Claude Code sequences the Stop hook relative to the visible turn transition — which cannot be determined without real use data.

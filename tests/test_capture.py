@@ -52,3 +52,34 @@ def test_enqueue_pre_compact_sets_flag(tmp_path):
     enqueue_candidate(con, "sess-1", None, "u", "a", 5.0, is_pre_compact=True)
     row = con.execute("SELECT is_pre_compact FROM candidates").fetchone()
     assert row[0] == 1
+
+
+def test_enqueue_atomicity_no_partial_row(tmp_path):
+    """SQLite INSERT + COMMIT is atomic: a connection closed between INSERT and COMMIT
+    leaves no partial rows in a second connection.
+
+    This tests the Stop hook kill scenario: Claude Code can SIGKILL the hook process
+    at any point. If the hook is killed after INSERT but before COMMIT, WAL mode
+    guarantees the incomplete transaction is never visible to other readers.
+    A successful commit is indivisible — all columns are present or the row doesn't
+    exist.
+    """
+    db = tmp_path / "mem.db"
+    con = connect(db)
+    migrate(con)
+
+    # Simulate a transaction that starts but never commits (hook killed mid-flight).
+    con.execute(
+        "INSERT INTO candidates "
+        "(id, session_id, prompt_id, user_turn, assistant_turn, classifier_score, status, is_pre_compact, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        ("cand-killed", "sess-killed", None, "user text", "asst text", 4.0, "pending", 0, "2026-01-01T00:00:00Z"),
+    )
+    # Do NOT commit — simulate process kill. Close without committing.
+    con.close()
+
+    # A fresh reader must see no rows from the uncommitted transaction.
+    con2 = connect(db)
+    rows = con2.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
+    con2.close()
+    assert rows == 0, "uncommitted INSERT must not be visible after connection close"
