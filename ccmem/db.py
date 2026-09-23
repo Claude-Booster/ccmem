@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS hook_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     event       TEXT NOT NULL,
     recorded_at TEXT NOT NULL,
-    excerpt     TEXT NOT NULL
+    excerpt     TEXT NOT NULL,
+    duration_ms INTEGER
 );
 
 INSERT OR IGNORE INTO schema_meta VALUES ('schema_version', '1');
@@ -73,18 +74,33 @@ def connect(path: str | Path) -> sqlite3.Connection:
 
 def migrate(con: sqlite3.Connection) -> None:
     con.executescript(_DDL)
+    # Idempotent column additions for DBs created before schema_version 2.
+    try:
+        con.execute("ALTER TABLE hook_log ADD COLUMN duration_ms INTEGER")
+        con.commit()
+    except Exception:
+        pass  # column already exists
 
 
-def log_hook_event(con: sqlite3.Connection, event: str, excerpt: str, keep: int = 10) -> None:
+def log_hook_event(
+    con: sqlite3.Connection,
+    event: str,
+    excerpt: str,
+    duration_ms: int | None = None,
+    keep: int = 10,
+) -> None:
     """Append one row to hook_log and trim the table to the last `keep` rows.
 
     `recorded_at` uses datetime('now') inside SQLite so the value is produced
     by the DB engine, not Python — this keeps the call site cache-safe.
+    `duration_ms` is the wall-clock time for the full hook invocation measured
+    with time.monotonic() at the hook entry/exit; it never reaches injected
+    output so it does not need to be cache-safe.
     """
     con.execute(
-        "INSERT INTO hook_log (event, recorded_at, excerpt) "
-        "VALUES (?, datetime('now'), ?)",
-        (event, excerpt[:200]),
+        "INSERT INTO hook_log (event, recorded_at, excerpt, duration_ms) "
+        "VALUES (?, datetime('now'), ?, ?)",
+        (event, excerpt[:200], duration_ms),
     )
     con.execute(
         "DELETE FROM hook_log WHERE id NOT IN "

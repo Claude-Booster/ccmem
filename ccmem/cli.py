@@ -235,14 +235,15 @@ def cmd_doctor(args):
     print(f"  candidates [pending]: {pending}")
 
     rows = con.execute(
-        "SELECT event, recorded_at, excerpt FROM hook_log ORDER BY id DESC LIMIT 10"
+        "SELECT event, recorded_at, excerpt, duration_ms FROM hook_log ORDER BY id DESC LIMIT 10"
     ).fetchall()
     if rows:
-        print(f"\nLast {len(rows)} UserPromptSubmit prompts received by hook:")
-        for event, recorded_at, excerpt in rows:
-            print(f"  [{recorded_at}] {excerpt[:120]}")
+        print(f"\nLast {len(rows)} hook events (most recent first):")
+        for event, recorded_at, excerpt, dur in rows:
+            dur_str = f"  {dur}ms" if dur is not None else ""
+            print(f"  [{recorded_at}] {event}{dur_str}  {excerpt[:80]}")
     else:
-        print("\nNo hook_log entries yet — hook has not received any prompts since DB was created.")
+        print("\nNo hook_log entries yet.")
         print("Verify: does !mem: reach mem_retrieve.py? Type a prompt and re-run doctor.")
     con.close()
 

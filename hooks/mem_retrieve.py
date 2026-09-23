@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -12,6 +13,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 def main() -> None:
     if os.environ.get("CCMEM_DISABLED"):
         return
+
+    _t0 = time.monotonic()
 
     try:
         raw = sys.stdin.buffer.read()
@@ -41,15 +44,6 @@ def main() -> None:
         pid, _ = project_key(root)
 
         output: dict = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit"}}
-
-        # --- log raw prompt for ccmem doctor verification ---
-        if os.path.exists(db_path):
-            try:
-                _lcon = connect(db_path)
-                log_hook_event(_lcon, "UserPromptSubmit", prompt)
-                _lcon.close()
-            except Exception:
-                pass
 
         # --- sigil capture (always, regardless of CCMEM_PER_TURN) ---
         text, scope, _cleaned = extract_sigil(prompt)
@@ -85,6 +79,16 @@ def main() -> None:
 
         if output.get("systemMessage") or output["hookSpecificOutput"].get("additionalContext"):
             print(json.dumps(output))
+
+        # --- log prompt excerpt + duration for doctor verification ---
+        if os.path.exists(db_path):
+            try:
+                _dur = int((time.monotonic() - _t0) * 1000)
+                _lcon = connect(db_path)
+                log_hook_event(_lcon, "UserPromptSubmit", prompt, duration_ms=_dur)
+                _lcon.close()
+            except Exception:
+                pass
 
     except Exception:
         return

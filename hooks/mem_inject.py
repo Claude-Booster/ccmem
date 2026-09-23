@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -11,6 +12,8 @@ def main() -> None:
     if os.environ.get("CCMEM_DISABLED"):
         return
 
+    _t0 = time.monotonic()
+
     try:
         raw = sys.stdin.buffer.read()
         payload = json.loads(raw)
@@ -18,7 +21,7 @@ def main() -> None:
         return
 
     try:
-        from ccmem.db import connect, migrate
+        from ccmem.db import connect, log_hook_event, migrate
         from ccmem.paths import maybe_migrate, resolve_home
         from ccmem.render import render
         from ccmem.retrieval import mark_accessed, retrieve
@@ -49,6 +52,11 @@ def main() -> None:
         # mark_accessed fires AFTER render so this session's ranking snapshot
         # is unaffected; mutations only influence subsequent sessions.
         mark_accessed(con, [m.id for m in memories])
+        _dur = int((time.monotonic() - _t0) * 1000)
+        try:
+            log_hook_event(con, "SessionStart", source, duration_ms=_dur)
+        except Exception:
+            pass
         con.close()
         if not block:
             return

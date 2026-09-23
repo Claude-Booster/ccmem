@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -10,6 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 def main() -> None:
     if os.environ.get("CCMEM_DISABLED"):
         return
+
+    _t0 = time.monotonic()
 
     try:
         raw = sys.stdin.buffer.read()
@@ -25,7 +28,7 @@ def main() -> None:
 
     try:
         from ccmem.capture import enqueue_candidate, score_turn
-        from ccmem.db import connect
+        from ccmem.db import connect, log_hook_event
         from ccmem.paths import maybe_migrate, resolve_home
 
         home = resolve_home()
@@ -67,6 +70,11 @@ def main() -> None:
 
         con = connect(db_path)
         enqueue_candidate(con, session_id, prompt_id, user_turn, assistant_msg, score)
+        _dur = int((time.monotonic() - _t0) * 1000)
+        try:
+            log_hook_event(con, "Stop", assistant_msg[:100], duration_ms=_dur)
+        except Exception:
+            pass
         con.close()
 
     except Exception:

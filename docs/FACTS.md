@@ -385,69 +385,114 @@ Quiet-state stub cost estimate: 534ms × ~2–3× (load-test ratio under calmer 
 During active sync this is compounded further. This estimate will be replaced with a
 clean measurement once the system is freshly rebooted.
 
+### Production path vs gate path
+
+The gate uses `subprocess.run([real_py, script], ...)` — a direct list invocation that
+creates one process. Production hooks in settings.json use a command string with spaces
+(the "OneDrive - <org>" path), which requires `shell=True` and spawns `cmd.exe`
+first. This adds a second process creation per hook call.
+
+Measured during active sync (2026-09-23):
+
+| Invocation | p50 | p90 | max |
+|---|---|---|---|
+| Gate [list, no shell] | 2636ms | 4360ms | 4360ms |
+| Production [string, shell=True] | **4685ms** | **7705ms** | 7705ms |
+
+**At p50=4685ms against a 5s Stop timeout, production hooks are at the edge on every
+turn during active sync.** The shell overhead is ~1.8× the gate measurement.
+
+### Defender exclusion results — corrected finding
+
+Earlier test used `-ExclusionProcess` (process scan). New test used `-ExclusionPath`
+(file read scan). Measured during active sync (2026-09-23), 8 runs each:
+
+| Exclusion state | p50 | p90 | Delta |
+|---|---|---|---|
+| Baseline (no exclusions) | 1796ms | 2494ms | — |
+| + hooks dir path exclusion | 1565ms | 2159ms | -13% |
+| + hooks dir + Python Lib path exclusion | **1132ms** | **1677ms** | **-37%** |
+
+The Python Lib directory (`pythoncore-3.14-64\Lib\`) is the big contributor — Defender
+scans each .py file imported at startup. Excluding it saves ~430ms on top of the hooks
+dir exclusion. Combined path exclusions save 37%, vs only 9% for the process exclusion.
+
+**With both path exclusions in production (shell=True, active sync):**
+estimated ~1132ms × 1.8 ≈ 2038ms — well under the 5s Stop timeout.
+
+**Setup recommendation:** add two Defender path exclusions:
+1. The hooks directory: `C:\...\ccmem\hooks` (or wherever hooks live after install)
+2. The Python Lib directory: `C:\...\pythoncore-3.14-64\Lib`
+
+These are stable, readable-only paths with no user-written code. The exclusions can be
+added by a `doctor --fix` command or a one-time setup script (both require admin).
+
 ### Findings on other hypotheses
 
-- **`-S` flag (skip site imports):** No improvement. `pywin32_bootstrap` (20ms, loaded via
-  `sitecustomize`) and total `site` startup (~58ms) are Python-side costs that do not
-  contribute meaningfully to the OS-level floor.
+- **`-S` flag (skip site imports):** No improvement (3.66s vs 3.35s — noise).
+  `pywin32_bootstrap` (20ms) and total site startup (~58ms) are not the bottleneck.
 - **PYTHONPATH:** Empty — not a factor.
-- **site-packages:** 17 entries only — not a factor.
-- **OneDrive file reads vs location:** Moving scripts outside OneDrive does NOT reduce
-  spawn cost. `%LOCALAPPDATA%` scripts show equal or higher variance. Cost is system-wide.
-- **Controlled Folder Access:** Audit mode (2), not blocking mode (1) — not a factor.
-- **Windows Defender:** Tested 2026-09-23 with admin process exclusion for `python.exe`.
-  Before: p50=1797ms. After: p50=1641ms. Delta: **-156ms (-9%)**. Defender is NOT the
-  primary cause. A 9% saving does not justify maintaining a permanent security exclusion.
+- **Site-packages:** 17 entries only — not a factor.
+- **Script location (OneDrive vs %LOCALAPPDATA%):** No effect on spawn cost. Ruled out.
+- **Controlled Folder Access:** Audit mode (2), not blocking — not a factor.
+- **Process exclusion:** -9% — the wrong exclusion type; file-path exclusions matter.
 
-### The fix (not yet applied, pending approval)
+### hook_log and production observability
 
-Change hook commands in `~/.claude/settings.json` from `python "C:\...\hook.py"` to
-the full real Python path `C:\...\AppData\Local\Python\pythoncore-3.14-64\python.exe
-"C:\...\hook.py"`. This:
-- Bypasses the Store stub on every hook spawn
-- Aligns production with what the gates measure
-- Saves ~2–3× startup overhead in quiet state
+The `hook_log` table now records `duration_ms` (within-Python execution time, measured
+with `time.monotonic()` at hook entry/exit — does NOT include OS process creation).
+All five hooks write timing on their active path. Doctor displays duration alongside
+event and excerpt. This gives a real distribution from real use, separate from the
+synthetic gate measurements.
 
-This is machine-specific; the full path must match `sys.executable` on the target
-machine. A setup helper or doctor check should capture and use `sys.executable` rather
-than hardcoding.
+Note: No production DB existed as of 2026-09-23. All timing data to date is from
+synthetic measurements. The daemon decision should incorporate PHASE1-NOTES.md data
+once production sessions accumulate hook_log entries.
 
 ### Stop hook own work
 
-~55ms (hook logic separate from startup). Measured with `CCMEM_THRESHOLD=0` and a live
-DB (capture + enqueue path). Module imports + JSON parse + DB connect + insert + commit.
-Interpreter startup is ~10× the logic cost in quiet state; during active sync, startup
-dominates even more.
+~55ms (within-Python logic). Module imports + JSON parse + DB connect + insert + commit.
+Startup dominates at all system states; logic cost is ~5% of the active-sync floor.
 
 ### Gate thresholds (`gates/config.json`)
 
-Calibrated to real-Python active-sync floor (534ms × ~3 = 1700ms). After the settings.json
-fix, production and gates will use the same executable, making these thresholds accurate.
+- `interpreter_floor_ms`: 1700 (active-sync p50 for real Python, no shell)
+- `kill_switch_headroom_ms`: 800
+- `budget_ms`: p90 syncing-state totals
 
-- `interpreter_floor_ms`: 1700 (active sync p50 — real Python)
-- `kill_switch_headroom_ms`: 800 (imports + load amplification during full gate runs)
-- `budget_ms`: raised to p90 syncing-state totals; see config.json `_comment` field
+**Gate vs production gap:** gates measure list invocation; production uses shell. After
+applying both Defender path exclusions, production floor is ~2038ms — within the 6000ms
+gate budget. Without exclusions it is 4685ms, which is also within budget but leaves
+only 315ms to the Stop timeout (5000ms).
 
-### Root cause summary (all hypotheses now tested)
+### Root cause summary
 
 | Cause | Contribution | Status |
 |---|---|---|
-| Windows Store stub (`python` on PATH) | 2–5× startup overhead | **Fixed** — settings.json uses real Python path |
-| OneDrive sync filter driver / system I/O | ~3× elevation during active sync (534ms→1700ms) | Irreducible — architectural change required |
-| Windows Defender | ~9% (150ms) per spawn | Not worth an exclusion |
-| Python site imports (`pywin32_bootstrap`) | ~20ms | Noise vs OS floor |
-| Script location (OneDrive vs %LOCALAPPDATA%) | No effect | Ruled out |
-| PYTHONPATH / site-packages size | No effect | Ruled out |
+| Windows Store stub (`python` on PATH) | 2–5× overhead | **Fixed** — settings.json uses real Python path |
+| `cmd.exe` shell (spaces in path) | ~1.8× overhead on top of real Python | Remaining — affects production only |
+| Defender file-path scanning (Lib + hooks) | ~660ms (~37%) during active sync | **Fixable** — two -ExclusionPath entries (admin) |
+| OneDrive sync filter driver / system I/O | ~600ms elevation (534ms→1132ms with exclusions) | Irreducible without eliminating spawns |
+| Defender process exclusion | ~9% | Negligible — wrong exclusion type |
+| Python site imports (`pywin32_bootstrap`) | ~20ms | Noise |
+| Script location, PYTHONPATH, site-packages | No effect | Ruled out |
 | Controlled Folder Access | No effect (audit mode) | Ruled out |
 
 ### Phase 4 analysis
 
-The daemon is the right long-term answer and the only remaining lever. All configuration
-fixes have been applied (Store stub) or ruled out (Defender exclusion, script relocation,
--S flag). The remaining ~1500ms active-sync floor is irreducible process-creation overhead
-from the Windows sync filter driver — it disappears only if spawns disappear. A pre-warmed
-Python daemon eliminates per-turn spawns entirely; that decision gates on PHASE1-NOTES.md
-data. See `docs/PLAN.md` Phase 4 section.
+**Current state (post Store-stub fix, no Defender exclusions):** Production Stop hook
+p50=4685ms against 5s timeout — marginal. Apply both Defender path exclusions → ~2038ms,
+comfortable headroom.
+
+**With exclusions, is daemon still needed?** Yes, for two reasons:
+1. p90 even with exclusions is ~3024ms estimated (1677ms × 1.8). Spikes still possible.
+2. The paused-OneDrive floor (not yet measured) will determine the best-case; if it is
+   < 300ms, exclusions + no-spawn is the story. If it is still > 800ms, spawn cost is
+   irreducible.
+
+**Daemon trigger threshold (preliminary):** Gate on `median(Stop.duration_ms) > X` from
+hook_log after 50 real sessions. X will be set after paused-OneDrive measurement
+establishes the no-sync floor. See `docs/PLAN.md` Phase 4.
 
 ---
 
