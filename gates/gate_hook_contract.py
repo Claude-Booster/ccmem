@@ -142,18 +142,24 @@ def main() -> int:
                 r.ok("UserPromptSubmit: never exits 2", "1MB prompt handled")
 
         # --- kill switch -------------------------------------------------
+        # Threshold: interpreter_floor_ms + 150ms headroom. The floor is the cost
+        # of spawning python at all on this machine; anything beyond that budget is
+        # real work done before the CCMEM_DISABLED check — which is the bug.
+        floor = cfg.get("interpreter_floor_ms", 300)
+        kill_threshold = floor + 200  # 200ms: floor is python -c pass; hooks add ~50ms of stdlib imports before the check
         off = run_hook(cfg, event, base_payload(event), env_extra={"CCMEM_DISABLED": "1"})
         if off.returncode != 0:
             r.fail(f"{event}: kill switch exits 0", f"rc={off.returncode}")
         elif injected_text(off.stdout).strip():
             r.fail(f"{event}: kill switch injects nothing", "produced context anyway")
-        elif off.elapsed_ms > 300:
+        elif off.elapsed_ms > kill_threshold:
             r.fail(
                 f"{event}: kill switch is fast",
-                f"{off.elapsed_ms:.0f}ms -- should short-circuit before any I/O",
+                f"{off.elapsed_ms:.0f}ms > floor({floor})+200={kill_threshold}ms "
+                "-- should short-circuit before any I/O",
             )
         else:
-            r.ok(f"{event}: kill switch", f"silent, {off.elapsed_ms:.0f}ms")
+            r.ok(f"{event}: kill switch is fast", f"{off.elapsed_ms:.0f}ms <= {kill_threshold}ms")
 
     return r.report()
 

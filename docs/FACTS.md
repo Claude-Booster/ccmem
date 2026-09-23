@@ -339,6 +339,41 @@ interactive session test to verify sigil preservation.
 
 ---
 
+## §11 — Python hook startup cost on Windows / OneDrive
+
+`status: verified` — measured 2026-09-23, v2.1.278, Windows 11 Enterprise, Python 3.14.3,
+project directory on OneDrive (network-backed).
+
+**Method:** 20 runs of `subprocess.run([sys.executable, '-c', 'pass'], capture_output=True)`
+from within a running Python process — the same spawn path gates use. This is the
+irreducible floor: every ccmem hook on every Claude Code event pays this cost.
+
+| Metric | Value |
+|---|---|
+| Min | 403ms |
+| Median | 534ms |
+| Max | 618ms |
+
+**Stop hook own work** (hook logic separate from startup): ~55ms. Measured by comparing
+`Stop` hook elapsed time against the floor with `CCMEM_THRESHOLD=0` and a live DB
+(forcing the capture + enqueue path to run). Module imports + JSON parse + DB connect
++ insert + commit cost ~55ms. Interpreter startup cost is ~10× the logic cost.
+
+**Import overhead:** Hooks import `json`, `os`, `sys` at module level before reaching the
+`CCMEM_DISABLED` check. This adds ~50ms above `python -c pass`. The kill-switch threshold
+in `gate_hook_contract.py` is therefore `interpreter_floor_ms + 200ms` (200ms = 50ms import
+overhead + 150ms margin to catch real I/O before short-circuit). The floor is stored in
+`gates/config.json` so it can be updated when re-measured or on different hardware.
+
+**Phase 4 implication:** If the startup cost is unacceptable (≥500ms added to every
+Stop hook call = ≥500ms latency added to every Claude turn), a native shim becomes
+necessary. The shim would be a compiled binary that: checks `CCMEM_DISABLED`, reads
+stdin, and hands off to a pre-warmed Python worker (daemon) or directly calls a
+C-extension. Until the startup cost is confirmed user-noticeable via PHASE1-NOTES.md
+feedback, this remains a Phase 4 item, not a prerequisite.
+
+---
+
 ## §10 — Research grounding for the small-K decision
 
 `status: community`
