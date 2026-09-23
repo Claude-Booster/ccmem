@@ -181,6 +181,17 @@ def cmd_doctor(args):
         print(f"  memories [{status}]: {n}")
     pending = con.execute("SELECT COUNT(*) FROM candidates WHERE status='pending'").fetchone()[0]
     print(f"  candidates [pending]: {pending}")
+
+    rows = con.execute(
+        "SELECT event, recorded_at, excerpt FROM hook_log ORDER BY id DESC LIMIT 10"
+    ).fetchall()
+    if rows:
+        print(f"\nLast {len(rows)} UserPromptSubmit prompts received by hook:")
+        for event, recorded_at, excerpt in rows:
+            print(f"  [{recorded_at}] {excerpt[:120]}")
+    else:
+        print("\nNo hook_log entries yet — hook has not received any prompts since DB was created.")
+        print("Verify: does !mem: reach mem_retrieve.py? Type a prompt and re-run doctor.")
     con.close()
 
 

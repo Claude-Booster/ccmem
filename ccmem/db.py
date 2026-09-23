@@ -52,6 +52,13 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS hook_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    event       TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    excerpt     TEXT NOT NULL
+);
+
 INSERT OR IGNORE INTO schema_meta VALUES ('schema_version', '1');
 INSERT OR IGNORE INTO schema_meta VALUES ('embedding_dim', '384');
 """
@@ -66,3 +73,22 @@ def connect(path: str | Path) -> sqlite3.Connection:
 
 def migrate(con: sqlite3.Connection) -> None:
     con.executescript(_DDL)
+
+
+def log_hook_event(con: sqlite3.Connection, event: str, excerpt: str, keep: int = 10) -> None:
+    """Append one row to hook_log and trim the table to the last `keep` rows.
+
+    `recorded_at` uses datetime('now') inside SQLite so the value is produced
+    by the DB engine, not Python — this keeps the call site cache-safe.
+    """
+    con.execute(
+        "INSERT INTO hook_log (event, recorded_at, excerpt) "
+        "VALUES (?, datetime('now'), ?)",
+        (event, excerpt[:200]),
+    )
+    con.execute(
+        "DELETE FROM hook_log WHERE id NOT IN "
+        "(SELECT id FROM hook_log ORDER BY id DESC LIMIT ?)",
+        (keep,),
+    )
+    con.commit()

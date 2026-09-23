@@ -21,7 +21,7 @@ def main() -> None:
 
     try:
         from ccmem.capture import extract_sigil
-        from ccmem.db import connect, migrate
+        from ccmem.db import connect, log_hook_event, migrate
         from ccmem.paths import maybe_migrate, resolve_home
         from ccmem.redact import redact
         from ccmem.render import render
@@ -41,6 +41,15 @@ def main() -> None:
         pid, _ = project_key(root)
 
         output: dict = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit"}}
+
+        # --- log raw prompt for ccmem doctor verification ---
+        if os.path.exists(db_path):
+            try:
+                _lcon = connect(db_path)
+                log_hook_event(_lcon, "UserPromptSubmit", prompt)
+                _lcon.close()
+            except Exception:
+                pass
 
         # --- sigil capture (always, regardless of CCMEM_PER_TURN) ---
         text, scope, _cleaned = extract_sigil(prompt)
