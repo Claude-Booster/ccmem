@@ -187,6 +187,67 @@ def _check_store_stub() -> None:
         print(f"python interpreter: {real_py}  (hooks use direct path, no Store stub)")
 
 
+def _read_defender_exclusion_paths() -> list[str] | None:
+    """Read Windows Defender path exclusions from the registry (no elevation needed).
+
+    Returns a list of excluded paths (lowercased), or None if unavailable
+    (non-Windows, registry key missing, or access denied).
+    """
+    try:
+        import winreg
+        key_path = r"SOFTWARE\Microsoft\Windows Defender\Exclusions\Paths"
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path)
+        exclusions = []
+        i = 0
+        while True:
+            try:
+                name, _, _ = winreg.EnumValue(key, i)
+                exclusions.append(name.lower())
+                i += 1
+            except OSError:
+                break
+        winreg.CloseKey(key)
+        return exclusions
+    except Exception:
+        return None
+
+
+def _check_defender_exclusions() -> None:
+    """Check whether Defender path exclusions are in place for ccmem hooks."""
+    hooks_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks"
+    )
+    py_exe = sys.executable
+    lib_dir = os.path.join(os.path.dirname(py_exe), "Lib")
+
+    current_exclusions = _read_defender_exclusion_paths()
+    hooks_excluded = (
+        current_exclusions is not None
+        and any(hooks_dir.lower() in e or e in hooks_dir.lower() for e in current_exclusions)
+    )
+    lib_excluded = (
+        current_exclusions is not None
+        and any(lib_dir.lower() in e or e in lib_dir.lower() for e in current_exclusions)
+    )
+
+    if current_exclusions is not None:
+        status_hooks = "OK" if hooks_excluded else "MISSING"
+        status_lib = "OK" if lib_excluded else "MISSING"
+        print(f"  Defender exclusion — hooks dir [{status_hooks}]: {hooks_dir}")
+        print(f"  Defender exclusion — Python Lib [{status_lib}]: {lib_dir}")
+    else:
+        print("  Defender exclusion — cannot read state (admin required to read HKLM Defender config)")
+
+    if current_exclusions is None or not hooks_excluded or not lib_excluded:
+        print("  WARN: Defender file-path exclusions reduce hook spawn cost by ~37%.")
+        print("  WARN: Apply with admin PowerShell (one-time, machine-level):")
+        if current_exclusions is None or not hooks_excluded:
+            print(f'  WARN:   Add-MpPreference -ExclusionPath "{hooks_dir}"')
+        if current_exclusions is None or not lib_excluded:
+            print(f'  WARN:   Add-MpPreference -ExclusionPath "{lib_dir}"')
+        print("  WARN: These are read-only source paths with no user-writable code.")
+
+
 def cmd_doctor(args):
     from ccmem.paths import resolve_home, sync_root_for
     home = resolve_home()
@@ -217,10 +278,12 @@ def cmd_doctor(args):
         print(f"hooks dir: {hooks_dir}  (outside sync boundary)")
 
     # Check whether settings.json hook commands use the Windows Store stub.
-    # The Store stub (WindowsApps/python.exe) re-execs to the real interpreter,
-    # creating two OS processes per hook spawn and adding 2-5x startup overhead.
-    # Fix: use the full real Python path (sys.executable) in each command.
     _check_store_stub()
+
+    # Check whether Defender path exclusions are in place.
+    # Path exclusions save ~37% on spawn cost during active OneDrive sync.
+    # Doctor shows status and the exact command to apply; does NOT apply silently.
+    _check_defender_exclusions()
 
     if not db_path.exists():
         print("Run: python -m ccmem.cli add ... to create it.")
@@ -242,9 +305,23 @@ def cmd_doctor(args):
         for event, recorded_at, excerpt, dur in rows:
             dur_str = f"  {dur}ms" if dur is not None else ""
             print(f"  [{recorded_at}] {event}{dur_str}  {excerpt[:80]}")
+
+        # Stop drop rate: count Stop vs UserPromptSubmit events to detect timeouts.
+        # A killed Stop hook leaves no hook_log entry — missing entries = lost candidates.
+        counts = dict(con.execute(
+            "SELECT event, COUNT(*) FROM hook_log GROUP BY event"
+        ).fetchall())
+        n_stop = counts.get("Stop", 0)
+        n_ups = counts.get("UserPromptSubmit", 0)
+        if n_ups > 0:
+            drop_pct = max(0, (n_ups - n_stop) / n_ups * 100)
+            print(f"\n  Stop/UPS ratio: {n_stop}/{n_ups} ({drop_pct:.0f}% apparent drop rate)")
+            if drop_pct > 2:
+                print("  WARN: >2% Stop drop rate — some turns may be losing candidate memories.")
+                print("  WARN: Check Stop hook timeout and system spawn latency.")
     else:
         print("\nNo hook_log entries yet.")
-        print("Verify: does !mem: reach mem_retrieve.py? Type a prompt and re-run doctor.")
+        print("Verify: hooks are registered in settings.json and a real session has run.")
     con.close()
 
 

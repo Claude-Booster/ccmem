@@ -508,27 +508,34 @@ best-case for production hooks without Defender exclusions. It matches gate-path
 active-sync (2636ms) closely — the production overhead (shell) ≈ the sync overhead.
 
 **With exclusions (37% saving) + paused sync:**
-estimated ~2712ms × 0.63 ≈ **~1700ms** production floor. This is near the hook budget
-and well inside the 5s Stop timeout.
+⚠️ **NOT MEASURED** — the ~1700ms figure is a proportional estimate (2712ms × 0.63).
+The 37% saving was measured against the interpreter floor, not against a real hook
+invocation under combined conditions. Two prior conclusions were reversed in this
+investigation by reasoning past the data; this one is not treated as a finding.
 
 **With exclusions + hooks installed outside OneDrive (proper plugin path):**
-estimated ~534ms (quiet floor) + shell overhead ≈ **~900ms** production floor. This is
-the target architecture. Plugin install at `~/.claude/plugins` puts hooks outside the
-sync boundary entirely.
+⚠️ **NOT MEASURED** — ~900ms is an extrapolation from quiet-state floor (534ms) + assumed
+shell overhead. Not confirmed.
 
-**With exclusions, is daemon still needed?** Probably not for correctness — 1700ms is
-well under the 5s timeout. But for user experience, 1700ms per turn is noticeable
-latency. The daemon eliminates spawns entirely (sub-millisecond per turn). Decision: defer
-to Phase 4, gate on real hook_log data showing sustained elevation.
+**Short-path settings.json fix (2026-09-23):**
+Hook commands updated from quoted long path to 8.3 short path (no spaces). Measured
+effect on shell=True invocation: **none.** Old quoted path p50=5154ms; short path
+p50=5253ms — within noise. Shell overhead (~1.7x vs list invocation) comes from cmd.exe
+being spawned at all, not from path quoting. Fix is harmless but not a performance win.
+Actual production hook timing depends on how Claude Code internally spawns hooks —
+if it uses direct CreateProcess without cmd.exe, short paths may help; untested.
 
-**Daemon trigger thresholds (set 2026-09-23, before real data):**
-Stored in `gates/config.json → daemon_trigger`. See that file for rationale.
-- `spawn_warn_ms=1000`: persistent p50 above this → recommend Defender exclusions
-- `spawn_daemon_ms=2500`: persistent p50 above this → recommend daemon
-- `duration_warn_ms=200`: within-Python p50 above this → DB performance issue
-- `min_hook_events=20`: minimum hook_log entries before any recommendation fires
+**Stop timeout raised to 10s** (2026-09-23 — from 5s). UserPromptSubmit also raised to
+10s. Rationale: with p90=6933ms under active sync, the 5s limit was causing guaranteed
+data loss on every high-sync turn. The 10s limit provides ~3s headroom at p90.
 
-These thresholds are set from synthetic measurements. Revisit after 50+ real sessions.
+**Daemon trigger thresholds (set 2026-09-23, revised 2026-09-23):**
+Stored in `gates/config.json → daemon_trigger`. Thresholds are now expressed as
+measured Stop hook drop rate, not spawn milliseconds. See config.json for rationale.
+
+The drop rate is measurable from hook_log: if Stop events are materially under-represented
+relative to UserPromptSubmit events (which fire once per turn), missing entries represent
+turns where Stop was killed. Doctor can compute this ratio.
 
 ---
 
