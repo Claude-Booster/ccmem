@@ -177,13 +177,14 @@ def check_cross_session_determinism(cfg: dict, r: GateResult) -> None:
     then asserts byte-identical output across two SessionStart runs.
     """
     import hashlib
+    import os as _os
     import sqlite3
     import tempfile
 
     project_id = hashlib.sha256(str(REPO_ROOT).encode()).hexdigest()[:16]
 
     with tempfile.TemporaryDirectory() as tmp:
-        db_path = str(Path(tmp) / "mem.db")
+        db_path = _os.path.join(tmp, "mem.db")
         sys.path.insert(0, str(REPO_ROOT))
         try:
             from ccmem.db import connect, migrate  # type: ignore
