@@ -31,6 +31,11 @@ REGISTRY = [
     ("gate_secret_hygiene",   1, "secrets redacted on write (content + context); DB gitignored"),
     ("gate_budget",           1, "injected context within token and top-K caps"),
     ("gate_phase1_notes",     1, "PHASE1-NOTES.md exists with substance before Phase 2"),
+    ("gate_fts5_retrieval",   1, "FTS5 query on seeded DB returns expected memories"),
+    ("gate_injection_format", 1, "injected block has correct delimiter and line format"),
+    ("gate_overlap_dedup",    1, "memory matching external CLAUDE.md line is suppressed"),
+    ("gate_subject_supersession", 1, "duplicate subject supersedes older row"),
+    ("gate_worktree_scoping", 1, "resolve_project_root identical for main and linked worktree"),
     # Phase 2+ gates get appended here as they're written. Suggested:
     # ("gate_retrieval_determinism",  2, "same query -> same ranking"),
     # ("gate_embedding_dim",          2, "refuse mixed-dimension reads"),
