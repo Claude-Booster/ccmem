@@ -9,7 +9,7 @@
   "budget_ms": {
     "SessionStart": 2000,
     "UserPromptSubmit": 1500,
-    "Stop": 1000,
+    "Stop": 750,
     "SessionEnd": 1200,
     "PreCompact": 2000
   },
