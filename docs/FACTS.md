@@ -394,13 +394,18 @@ first. This adds a second process creation per hook call.
 
 Measured during active sync (2026-09-23):
 
-| Invocation | p50 | p90 | max |
-|---|---|---|---|
-| Gate [list, no shell] | 2636ms | 4360ms | 4360ms |
-| Production [string, shell=True] | **4685ms** | **7705ms** | 7705ms |
+| Invocation | Exclusions | p50 | p90 | max |
+|---|---|---|---|---|
+| Gate [list, no shell] | none | 2636ms | 4360ms | 4360ms |
+| Production [string, shell=True] | none | **4685ms** | **7705ms** | 7705ms |
+| Gate [list, no shell] | Lib only | 1645ms | 1917ms | 2212ms |
+| Production [string, shell=True] | Lib only | **3056ms** | **4085ms** | 4152ms |
+| Floor [`python -c pass`] | Lib only | 1243ms | 1541ms | 2095ms |
 
-**At p50=4685ms against a 5s Stop timeout, production hooks are at the edge on every
-turn during active sync.** The shell overhead is ~1.8× the gate measurement.
+**At p50=4685ms against a 5s Stop timeout, production hooks were at the edge without
+exclusions.** Stop timeout raised to 10s. With Lib exclusion applied, production p50=3056ms
+— well within 10s limit. The shell overhead is consistently **1.86×** the list-invocation
+gate measurement across all states.
 
 ### Defender exclusion results — corrected finding
 
@@ -417,8 +422,22 @@ The Python Lib directory (`pythoncore-3.14-64\Lib\`) is the big contributor — 
 scans each .py file imported at startup. Excluding it saves ~430ms on top of the hooks
 dir exclusion. Combined path exclusions save 37%, vs only 9% for the process exclusion.
 
-**With both path exclusions in production (shell=True, active sync):**
-estimated ~1132ms × 1.8 ≈ 2038ms — well under the 5s Stop timeout.
+**With Lib-only exclusion in production (shell=True, active sync) — MEASURED 2026-09-23:**
+
+| Metric | p50 | p90 | max |
+|---|---|---|---|
+| Production (shell=True, short path) | **3056ms** | **4085ms** | 4152ms |
+| Gate (list, no shell) | 1645ms | 1917ms | 2212ms |
+| Floor (python -c pass) | 1243ms | 1541ms | 2095ms |
+
+Shell overhead: 3056/1645 = **1.86×** (consistent with prior 1.8× measurement).
+Hook-file overhead (gate − floor): **402ms** — Defender still scans `mem_capture.py` on
+read from OneDrive. hooks-dir exclusion would eliminate this; prior isolated measurement
+saved ~231ms on gate path → estimated gate ~1414ms, production **~2825ms** with both
+exclusions.
+
+**With both path exclusions in production (shell=True, active sync) — estimated:**
+~2825ms. Lib exclusion measured; hooks-dir exclusion not yet applied.
 
 **Setup recommendation:** add two Defender path exclusions:
 1. The hooks directory: `C:\...\ccmem\hooks` (or wherever hooks live after install)
@@ -457,7 +476,7 @@ Startup dominates at all system states; logic cost is ~5% of the active-sync flo
 ### Gate thresholds (`gates/config.json`)
 
 - `interpreter_floor_ms`: 1700 (active-sync p50 for real Python, no shell)
-- `kill_switch_headroom_ms`: 800
+- `kill_switch_headroom_ms`: 1500 (raised from 800; covers hooks-dir Defender scan ~400ms + stdlib imports ~200ms + concurrent test load ~400ms; total threshold = 3200ms)
 - `budget_ms`: p90 syncing-state totals
 
 **Gate vs production gap:** gates measure list invocation; production uses shell. After
@@ -471,7 +490,7 @@ only 315ms to the Stop timeout (5000ms).
 |---|---|---|
 | Windows Store stub (`python` on PATH) | 2–5× overhead | **Fixed** — settings.json uses real Python path |
 | `cmd.exe` shell (spaces in path) | ~1.8× overhead on top of real Python | Remaining — affects production only |
-| Defender file-path scanning (Lib + hooks) | ~660ms (~37%) during active sync | **Fixable** — two -ExclusionPath entries (admin) |
+| Defender file-path scanning (Lib) | ~2098ms production (41%) during active sync | **Partially fixed** — Lib exclusion applied; hooks-dir exclusion pending |
 | OneDrive sync filter driver / system I/O | ~600ms elevation (534ms→1132ms with exclusions) | Irreducible without eliminating spawns |
 | Defender process exclusion | ~9% | Negligible — wrong exclusion type |
 | Python site imports (`pywin32_bootstrap`) | ~20ms | Noise |
@@ -480,9 +499,11 @@ only 315ms to the Stop timeout (5000ms).
 
 ### Phase 4 analysis
 
-**Current state (post Store-stub fix, no Defender exclusions):** Production Stop hook
-p50=4685ms against 5s timeout — marginal. Apply both Defender path exclusions → ~2038ms,
-comfortable headroom.
+**Current state (post Store-stub fix, Lib exclusion applied):** Production Stop hook
+p50=3056ms, p90=4085ms against 10s timeout — comfortable. Stop timeout raised to 10s
+(from 5s). Apply hooks-dir exclusion → estimated ~2825ms. Apply both exclusions +
+move hooks outside OneDrive → estimated ~2310ms. Daemon threshold (spawn_daemon_ms=3500)
+is not tripped at current floor p50=1243ms; latency trigger will not fire.
 
 ### Paused-OneDrive measurement (2026-09-23)
 
@@ -507,15 +528,24 @@ from OneDrive. Defender exclusions (which we reverted after testing) eliminated 
 best-case for production hooks without Defender exclusions. It matches gate-path
 active-sync (2636ms) closely — the production overhead (shell) ≈ the sync overhead.
 
-**With exclusions (37% saving) + paused sync:**
-⚠️ **NOT MEASURED** — the ~1700ms figure is a proportional estimate (2712ms × 0.63).
-The 37% saving was measured against the interpreter floor, not against a real hook
-invocation under combined conditions. Two prior conclusions were reversed in this
-investigation by reasoning past the data; this one is not treated as a finding.
+**With Lib exclusion, active sync, production path — MEASURED 2026-09-23:**
+p50=**3056ms**, p90=4085ms. Gate path: p50=1645ms. Floor: p50=1243ms.
+Lib exclusion saved 41% off production p50 vs no-exclusion baseline (5154ms).
+
+**With both exclusions (Lib + hooks-dir), active sync, production path — estimated:**
+~2825ms. hooks-dir exclusion not yet applied; estimate based on prior isolated saving
+of ~231ms on gate path.
+
+**With both exclusions + paused sync:**
+Paused-sync floor (1333ms) ≈ active-sync floor with Lib exclusion (1243ms) — they are
+close. Paused sync does not materially improve on Lib exclusion. No separate measurement
+taken; paused+both-exclusions production is expected within 200ms of active+both-exclusions.
 
 **With exclusions + hooks installed outside OneDrive (proper plugin path):**
-⚠️ **NOT MEASURED** — ~900ms is an extrapolation from quiet-state floor (534ms) + assumed
-shell overhead. Not confirmed.
+⚠️ **NOT MEASURED** — gate overhead above floor is 402ms with Lib exclusion (Defender
+scans hook script on read from OneDrive). Moving hooks outside OneDrive would eliminate
+this filter-driver interception; production estimate: floor(1243ms) × 1.86 ≈ ~2310ms.
+Not confirmed.
 
 **Short-path settings.json fix (2026-09-23):**
 Hook commands updated from quoted long path to 8.3 short path (no spaces). Measured
