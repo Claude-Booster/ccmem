@@ -155,6 +155,38 @@ def cmd_inject(args):
     print(block)
 
 
+def _check_store_stub() -> None:
+    """Warn if any ccmem hook command uses the Windows Store Python stub."""
+    import json as _json
+    import re as _re
+    settings_path = Path(os.path.expanduser("~")) / ".claude" / "settings.json"
+    if not settings_path.exists():
+        return
+    try:
+        cfg = _json.loads(settings_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    hooks_cfg = cfg.get("hooks", {})
+    # Pattern: command starts with bare "python " (Store stub on Windows PATH)
+    stub_pattern = _re.compile(r'^python\s+"[^"]*ccmem', _re.IGNORECASE)
+    real_py = sys.executable  # what gates use; what hooks should use
+    stub_found = []
+    for event, hook_list in hooks_cfg.items():
+        for group in hook_list:
+            for hook in group.get("hooks", []):
+                cmd = hook.get("command", "")
+                if stub_pattern.match(cmd):
+                    stub_found.append((event, cmd[:80]))
+    if stub_found:
+        print(f"WARN: {len(stub_found)} hook command(s) use 'python' (Windows Store stub).")
+        print(f"WARN: The stub re-execs to the real interpreter, adding 2-5x startup overhead.")
+        print(f"WARN: Replace 'python' with the full path: {real_py}")
+        for event, cmd in stub_found:
+            print(f"WARN:   {event}: {cmd}...")
+    else:
+        print(f"python interpreter: {real_py}  (hooks use direct path, no Store stub)")
+
+
 def cmd_doctor(args):
     from ccmem.paths import resolve_home, sync_root_for
     home = resolve_home()
@@ -183,6 +215,12 @@ def cmd_doctor(args):
         print("WARN: Consider installing ccmem as a proper plugin (hooks land in ~/.claude/plugins, outside sync).")
     else:
         print(f"hooks dir: {hooks_dir}  (outside sync boundary)")
+
+    # Check whether settings.json hook commands use the Windows Store stub.
+    # The Store stub (WindowsApps/python.exe) re-execs to the real interpreter,
+    # creating two OS processes per hook spawn and adding 2-5x startup overhead.
+    # Fix: use the full real Python path (sys.executable) in each command.
+    _check_store_stub()
 
     if not db_path.exists():
         print("Run: python -m ccmem.cli add ... to create it.")
