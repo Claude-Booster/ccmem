@@ -353,12 +353,20 @@ def cmd_doctor(args):
         ).fetchall())
         n_stop = counts.get("Stop", 0)
         n_ups = counts.get("UserPromptSubmit", 0)
+        _min_events = _daemon_cfg.get("min_hook_events", 50)
         if n_ups > 0:
-            drop_pct = max(0, (n_ups - n_stop) / n_ups * 100)
-            print(f"\n  Stop/UPS ratio: {n_stop}/{n_ups} ({drop_pct:.0f}% apparent drop rate)")
-            if drop_pct > 2:
-                print("  WARN: >2% Stop drop rate — some turns may be losing candidate memories.")
-                print("  WARN: Check Stop hook timeout and system spawn latency.")
+            print(f"\n  Stop/UPS events: {n_stop}/{n_ups}", end="")
+            if n_ups < _min_events:
+                print(f"  (insufficient data — need {_min_events}+ UPS events for drop-rate conclusions)")
+            else:
+                drop_pct = max(0, (n_ups - n_stop) / n_ups * 100)
+                warn_pct = _daemon_cfg.get("stop_drop_warn_pct", 2.0)
+                print(f"  ({drop_pct:.1f}% apparent drop rate)")
+                if drop_pct >= warn_pct:
+                    print(f"  WARN: >{warn_pct:.0f}% Stop drop rate — some turns are losing candidate memories.")
+                    print("  WARN: Check Stop hook timeout and system spawn latency.")
+        else:
+            print("\n  Stop/UPS events: 0/0  (no sessions recorded yet)")
     else:
         print("\nNo hook_log entries yet.")
         print("Verify: hooks are registered in settings.json and a real session has run.")
