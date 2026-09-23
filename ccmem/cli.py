@@ -188,28 +188,69 @@ def _check_store_stub() -> None:
 
 
 def _read_defender_exclusion_paths() -> list[str] | None:
-    """Read Windows Defender path exclusions from the registry (no elevation needed).
+    """Read Windows Defender path exclusions from the registry.
 
-    Returns a list of excluded paths (lowercased), or None if unavailable
-    (non-Windows, registry key missing, or access denied).
+    Tries the local Defender key first, then the Group Policy / Intune key.
+    Returns lowercased list, or None if all reads fail (non-Windows, access denied).
+    Policy exclusions (from Intune/GPO) live in a separate key and can override
+    or coexist with local exclusions — read both.
     """
     try:
         import winreg
-        key_path = r"SOFTWARE\Microsoft\Windows Defender\Exclusions\Paths"
-        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path)
-        exclusions = []
-        i = 0
-        while True:
+        keys_to_try = [
+            r"SOFTWARE\Microsoft\Windows Defender\Exclusions\Paths",
+            r"SOFTWARE\Policies\Microsoft\Windows Defender\Exclusions\Paths",
+        ]
+        all_paths: list[str] = []
+        any_readable = False
+        for key_path in keys_to_try:
             try:
-                name, _, _ = winreg.EnumValue(key, i)
-                exclusions.append(name.lower())
-                i += 1
-            except OSError:
-                break
-        winreg.CloseKey(key)
-        return exclusions
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path)
+                any_readable = True
+                i = 0
+                while True:
+                    try:
+                        name, _, _ = winreg.EnumValue(key, i)
+                        all_paths.append(name.lower())
+                        i += 1
+                    except OSError:
+                        break
+                winreg.CloseKey(key)
+            except Exception:
+                continue
+        return all_paths if any_readable else None
     except Exception:
         return None
+
+
+_DEFENDER_STATE_FILE = "defender_state.json"
+
+
+def _load_defender_state(home: str) -> dict:
+    """Load previously confirmed Defender exclusion state from CCMEM_HOME."""
+    import json as _json
+    path = os.path.join(home, _DEFENDER_STATE_FILE)
+    try:
+        return _json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_defender_state(home: str, confirmed_paths: list[str], floor_ms: float) -> None:
+    """Save confirmed Defender exclusion state to CCMEM_HOME."""
+    import json as _json
+    from datetime import datetime, timezone
+    state = {
+        "confirmed_paths": confirmed_paths,
+        "confirmed_at": datetime.now(timezone.utc).isoformat(),
+        "confirmed_floor_ms": round(floor_ms),
+    }
+    try:
+        Path(os.path.join(home, _DEFENDER_STATE_FILE)).write_text(
+            _json.dumps(state, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
 
 
 def _measure_spawn_floor_ms(runs: int = 5) -> float:
@@ -229,40 +270,93 @@ def _measure_spawn_floor_ms(runs: int = 5) -> float:
     return _stat.median(times)
 
 
-def _check_defender_exclusions() -> None:
-    """Check whether Defender path exclusions are in place for ccmem hooks."""
+def _check_defender_exclusions(home: str, spawn_floor_ms: float | None = None) -> None:
+    """Check Defender path exclusions are in place and have not been reverted by policy.
+
+    On Intune/Group Policy managed machines, Add-MpPreference can be silently reverted
+    at the next policy refresh. This function tracks the last confirmed state in
+    CCMEM_HOME/defender_state.json and flags when a confirmed exclusion disappears.
+
+    Detection strategy (in order):
+    1. Read both the local Defender key and the policy/Intune key from the registry.
+    2. If readable: compare against the expected set; flag any that are missing.
+       Save confirmed state when all expected exclusions are present.
+    3. If not readable (access denied): fall back to timing evidence — if the
+       spawn floor is >50% above the confirmed floor, the exclusion may have reverted.
+    """
     hooks_dir = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks"
     )
     py_exe = sys.executable
     lib_dir = os.path.join(os.path.dirname(py_exe), "Lib")
 
-    current_exclusions = _read_defender_exclusion_paths()
-    hooks_excluded = (
-        current_exclusions is not None
-        and any(hooks_dir.lower() in e or e in hooks_dir.lower() for e in current_exclusions)
-    )
-    lib_excluded = (
-        current_exclusions is not None
-        and any(lib_dir.lower() in e or e in lib_dir.lower() for e in current_exclusions)
-    )
+    intended = {hooks_dir.lower(): hooks_dir, lib_dir.lower(): lib_dir}
 
-    if current_exclusions is not None:
-        status_hooks = "OK" if hooks_excluded else "MISSING"
-        status_lib = "OK" if lib_excluded else "MISSING"
-        print(f"  Defender exclusion — hooks dir [{status_hooks}]: {hooks_dir}")
-        print(f"  Defender exclusion — Python Lib [{status_lib}]: {lib_dir}")
+    current = _read_defender_exclusion_paths()
+    saved_state = _load_defender_state(home)
+
+    def _is_excluded(target: str, exclusion_list: list[str]) -> bool:
+        t = target.lower()
+        return any(t in e or e in t for e in exclusion_list)
+
+    if current is not None:
+        # Registry is readable — check each expected path
+        present = {k: _is_excluded(v, current) for k, v in intended.items()}
+        all_ok = all(present.values())
+        for raw_key, path in intended.items():
+            status = "OK" if present[raw_key] else "MISSING"
+            label = "hooks dir" if "hooks" in raw_key else "Python Lib"
+            print(f"  Defender exclusion — {label} [{status}]: {path}")
+
+        # Flag reverts against previously confirmed state
+        if saved_state.get("confirmed_paths"):
+            prev_confirmed = set(p.lower() for p in saved_state["confirmed_paths"])
+            reverted = [
+                path for raw_key, path in intended.items()
+                if raw_key in prev_confirmed and not present[raw_key]
+            ]
+            if reverted:
+                at = saved_state.get("confirmed_at", "unknown time")[:19]
+                print(f"  WARN: Exclusion(s) were confirmed at {at} but are now MISSING.")
+                print("  WARN: Likely reverted by Intune or Group Policy refresh.")
+                print("  WARN: Re-apply with admin PowerShell:")
+                for path in reverted:
+                    print(f'  WARN:   Add-MpPreference -ExclusionPath "{path}"')
+
+        if all_ok and spawn_floor_ms is not None:
+            _save_defender_state(home, list(intended.values()), spawn_floor_ms)
     else:
-        print("  Defender exclusion — cannot read state (admin required to read HKLM Defender config)")
+        # Registry unreadable — use timing as evidence
+        print("  Defender exclusion — registry unreadable (admin required for HKLM)")
+        if saved_state.get("confirmed_floor_ms") and spawn_floor_ms is not None:
+            confirmed_floor = saved_state["confirmed_floor_ms"]
+            at = saved_state.get("confirmed_at", "unknown time")[:19]
+            ratio = spawn_floor_ms / confirmed_floor
+            if ratio > 1.5:
+                print(f"  WARN: Spawn floor is {spawn_floor_ms:.0f}ms vs confirmed {confirmed_floor}ms at {at}.")
+                print("  WARN: >50% regression suggests Defender exclusion was reverted by policy.")
+                print("  WARN: Verify with admin PowerShell: (Get-MpPreference).ExclusionPath")
+            else:
+                print(f"  Timing OK: floor {spawn_floor_ms:.0f}ms vs confirmed {confirmed_floor}ms at {at}  (no revert detected)")
+        elif saved_state.get("confirmed_paths"):
+            at = saved_state.get("confirmed_at", "unknown time")[:19]
+            print(f"  Last confirmed: {at} — run doctor with admin rights to re-verify registry state.")
+        else:
+            print("  No confirmed baseline yet. Apply exclusions, then run doctor to save baseline.")
 
-    if current_exclusions is None or not hooks_excluded or not lib_excluded:
-        print("  WARN: Defender file-path exclusions reduce hook spawn cost by ~37%.")
-        print("  WARN: Apply with admin PowerShell (one-time, machine-level):")
-        if current_exclusions is None or not hooks_excluded:
-            print(f'  WARN:   Add-MpPreference -ExclusionPath "{hooks_dir}"')
-        if current_exclusions is None or not lib_excluded:
-            print(f'  WARN:   Add-MpPreference -ExclusionPath "{lib_dir}"')
-        print("  WARN: These are read-only source paths with no user-writable code.")
+    # Show apply instructions if any are missing or unreadable
+    missing_cmds = []
+    if current is None:
+        missing_cmds = list(intended.values())
+    else:
+        missing_cmds = [v for k, v in intended.items() if not _is_excluded(v, current)]
+
+    if missing_cmds:
+        print("  WARN: Defender file-path exclusions reduce hook spawn cost ~37%.")
+        print("  WARN: Apply with admin PowerShell:")
+        for path in missing_cmds:
+            print(f'  WARN:   Add-MpPreference -ExclusionPath "{path}"')
+        print("  WARN: These are read-only paths with no user-writable code.")
 
 
 def cmd_doctor(args):
@@ -320,10 +414,9 @@ def cmd_doctor(args):
         print(f"  NOTE: 10s Stop timeout prevents data loss but does not make {_spawn_p50:.0f}ms pauses fast.")
         print( "  NOTE: Apply Defender path exclusions to reduce spawn cost (see below).")
 
-    # Check whether Defender path exclusions are in place.
-    # Path exclusions save ~37% on spawn cost during active OneDrive sync.
-    # Doctor shows status and the exact command to apply; does NOT apply silently.
-    _check_defender_exclusions()
+    # Check whether Defender path exclusions are in place and have not been reverted.
+    # Passes spawn floor so the saved baseline can be updated when all exclusions are OK.
+    _check_defender_exclusions(home, spawn_floor_ms=_spawn_p50)
 
     if not db_path.exists():
         print("Run: python -m ccmem.cli add ... to create it.")
