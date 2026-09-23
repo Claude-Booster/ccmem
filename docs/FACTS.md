@@ -395,8 +395,9 @@ clean measurement once the system is freshly rebooted.
 - **OneDrive file reads vs location:** Moving scripts outside OneDrive does NOT reduce
   spawn cost. `%LOCALAPPDATA%` scripts show equal or higher variance. Cost is system-wide.
 - **Controlled Folder Access:** Audit mode (2), not blocking mode (1) — not a factor.
-- **Windows Defender:** Unconfirmed — requires admin to add/remove exclusions and test.
-  A test script is at `docs/scratchpad/test_defender_exclusion.ps1` (run elevated).
+- **Windows Defender:** Tested 2026-09-23 with admin process exclusion for `python.exe`.
+  Before: p50=1797ms. After: p50=1641ms. Delta: **-156ms (-9%)**. Defender is NOT the
+  primary cause. A 9% saving does not justify maintaining a permanent security exclusion.
 
 ### The fix (not yet applied, pending approval)
 
@@ -427,16 +428,26 @@ fix, production and gates will use the same executable, making these thresholds 
 - `kill_switch_headroom_ms`: 800 (imports + load amplification during full gate runs)
 - `budget_ms`: raised to p90 syncing-state totals; see config.json `_comment` field
 
+### Root cause summary (all hypotheses now tested)
+
+| Cause | Contribution | Status |
+|---|---|---|
+| Windows Store stub (`python` on PATH) | 2–5× startup overhead | **Fixed** — settings.json uses real Python path |
+| OneDrive sync filter driver / system I/O | ~3× elevation during active sync (534ms→1700ms) | Irreducible — architectural change required |
+| Windows Defender | ~9% (150ms) per spawn | Not worth an exclusion |
+| Python site imports (`pywin32_bootstrap`) | ~20ms | Noise vs OS floor |
+| Script location (OneDrive vs %LOCALAPPDATA%) | No effect | Ruled out |
+| PYTHONPATH / site-packages size | No effect | Ruled out |
+| Controlled Folder Access | No effect (audit mode) | Ruled out |
+
 ### Phase 4 analysis
 
-The daemon remains the right long-term answer for per-turn latency. Moving scripts
-outside the sync boundary is not the fix (overhead is system-wide). The Store stub fix
-above is the immediate win and should be done first; it reduces the quiet-state floor
-by 2–3× without any architectural change. Remaining overhead after the stub fix is
-attributable to Defender scanning (unconfirmed) and Windows process-creation overhead
-(irreducible without eliminating spawns). A pre-warmed Python daemon eliminates
-per-turn spawns entirely; that decision gates on PHASE1-NOTES.md data.
-See `docs/PLAN.md` Phase 4 section.
+The daemon is the right long-term answer and the only remaining lever. All configuration
+fixes have been applied (Store stub) or ruled out (Defender exclusion, script relocation,
+-S flag). The remaining ~1500ms active-sync floor is irreducible process-creation overhead
+from the Windows sync filter driver — it disappears only if spawns disappear. A pre-warmed
+Python daemon eliminates per-turn spawns entirely; that decision gates on PHASE1-NOTES.md
+data. See `docs/PLAN.md` Phase 4 section.
 
 ---
 
