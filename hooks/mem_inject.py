@@ -41,14 +41,15 @@ def main() -> None:
             con.close()
             return
 
-        mark_accessed(con, [m.id for m in memories])
-        con.close()
-
         external_lines = []
         test_claude = os.environ.get("CCMEM_TEST_CLAUDE_MD")
         if test_claude:
             external_lines = [test_claude]
         block = render(memories, root, source, external_lines=external_lines)
+        # mark_accessed fires AFTER render so this session's ranking snapshot
+        # is unaffected; mutations only influence subsequent sessions.
+        mark_accessed(con, [m.id for m in memories])
+        con.close()
         if not block:
             return
 

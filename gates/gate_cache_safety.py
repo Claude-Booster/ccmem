@@ -168,6 +168,91 @@ def check_static_volatility(r: GateResult) -> None:
         r.ok("no volatile values on injection path", f"{len(paths)} files scanned")
 
 
+def check_cross_session_determinism(cfg: dict, r: GateResult) -> None:
+    """Cross-session invariant: mark_accessed mutations must not change next session's output.
+
+    The retrieval query sorts by access_count DESC. If mark_accessed fires BEFORE render
+    in session N, the DB is already mutated when session N+1 retrieves. This check seeds
+    fresh memories with non-uniform access_counts so that a top-K shuffle IS detectable,
+    then asserts byte-identical output across two SessionStart runs.
+    """
+    import hashlib
+    import sqlite3
+    import tempfile
+
+    project_id = hashlib.sha256(str(REPO_ROOT).encode()).hexdigest()[:16]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = str(Path(tmp) / "mem.db")
+        sys.path.insert(0, str(REPO_ROOT))
+        try:
+            from ccmem.db import connect, migrate  # type: ignore
+        except Exception as exc:
+            r.fail("cross-session: ccmem importable", str(exc))
+            return
+
+        con = connect(db_path)
+        migrate(con)
+        # Insert 15 memories with distinct access_counts so that a single
+        # mark_accessed pass on the top-12 can reshuffle borderline items.
+        for i in range(15):
+            con.execute(
+                "INSERT INTO memories "
+                "(id, type, content, subject, scope, project_id, project_root, "
+                "created_at, status, access_count) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    f"cs-test-{i:02d}",
+                    "decision",
+                    f"Cross-session fact {i}: chose approach {i % 3}.",
+                    f"cs-subject-{i}",
+                    "project",
+                    project_id,
+                    str(REPO_ROOT),
+                    f"2026-01-{i+1:02d}T00:00:00Z",
+                    "active",
+                    i,  # access_count = 0..14; items 12-14 rank highest initially
+                ),
+            )
+        con.commit()
+        con.close()
+
+        env_extra = {"CCMEM_HOME": tmp}
+        payload = base_payload("SessionStart")
+
+        run1 = run_hook(cfg, "SessionStart", payload, env_extra=env_extra)
+        if run1.returncode != 0 or run1.timed_out:
+            r.fail("cross-session: SessionStart stable across sessions",
+                   f"run1 failed (rc={run1.returncode})")
+            return
+        out1 = injected_text(run1.stdout)
+        if not out1.strip():
+            r.fail("cross-session: SessionStart stable across sessions",
+                   "no output in run1 -- check seeding or retrieval")
+            return
+
+        run2 = run_hook(cfg, "SessionStart", payload, env_extra=env_extra)
+        if run2.returncode != 0 or run2.timed_out:
+            r.fail("cross-session: SessionStart stable across sessions",
+                   f"run2 failed (rc={run2.returncode})")
+            return
+        out2 = injected_text(run2.stdout)
+
+        if out1 == out2:
+            r.ok("cross-session: SessionStart stable across sessions",
+                 f"{len(out1)} chars byte-identical after mark_accessed")
+        else:
+            idx = next(
+                (i for i, (x, y) in enumerate(zip(out1, out2)) if x != y),
+                min(len(out1), len(out2)),
+            )
+            lo, hi = max(0, idx - 40), idx + 40
+            r.fail(
+                "cross-session: SessionStart stable across sessions",
+                f"diverges at char {idx}: {out1[lo:hi]!r} vs {out2[lo:hi]!r}",
+            )
+
+
 def main() -> int:
     cfg = load_config()
     r = GateResult("cache safety")
@@ -179,6 +264,7 @@ def main() -> int:
         r.ok("test DB seeded", str(db.relative_to(REPO_ROOT)))
 
     check_determinism(cfg, r, "SessionStart")
+    check_cross_session_determinism(cfg, r)
     check_per_turn_default_off(cfg, r)
     check_tool_hooks(r)
     check_static_volatility(r)
