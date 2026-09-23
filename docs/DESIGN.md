@@ -500,6 +500,43 @@ embeddings and the `session_injections` table to have real data.
 | 4 | Cache telemetry | Adaptive injection using resume/fork fields, session_injections table | Phase 1 SessionStart hook |
 | 5 | Eval harness | Re-explanation rate detector, `ccmem doctor --eval` | Phase 2 embeddings + Phase 4 injection tracking |
 
+### Per-turn cost and the Stop hook problem
+
+Stop fires on every turn. On Windows with hooks living inside a cloud sync boundary
+(OneDrive), each Stop spawn costs 3–5s. This is the main Phase 1 friction risk —
+not data loss (the 10s timeout addresses that), but a pause on every turn that makes
+the tool annoying enough to stop using.
+
+Three options in cost order, recorded here before any of them is committed to:
+
+**Option A — Defender path exclusions + proper plugin install** (cheapest, already
+partially done): Defender path exclusions cut spawn cost ~37%. Moving hooks to
+`~/.claude/plugins` (outside sync boundary) eliminates the filter-driver overhead
+entirely. Combined, these may reduce Stop latency to ~600–900ms, which is acceptable.
+Requires one admin PowerShell command (exclusions) and a proper install step. No
+architecture change. Try this first.
+
+**Option B — Reduce Stop firing frequency**: Stop hook does nothing (returns
+immediately). Candidates are captured only at PreCompact and SessionEnd. This
+eliminates the per-turn Stop cost entirely at the price of in-session granularity —
+if a session ends badly (crash, forced kill) before PreCompact fires, the session's
+candidates are lost. Manual `!mem:` capture still works. Zero architecture change;
+the Stop hook becomes a one-liner (`return`). Cost: candidates are captured at
+session level, not turn level. This is the right option if Option A doesn't get Stop
+latency below ~1s.
+
+**Option C — Pre-warmed Python daemon**: A persistent Python process accepts hook
+payloads over a local socket, eliminating OS spawn per turn entirely. Sub-millisecond
+per turn for all hooks. High implementation complexity (process lifecycle, crash
+recovery, IPC). Justified only if both Option A and Option B are rejected. Gate on
+measured drop rate (>5% Stop/UPS in hook_log) or persistent spawn floor above
+`spawn_daemon_ms` in `gates/config.json` after Options A+B are applied.
+
+PHASE1-NOTES.md will determine which option (if any beyond A) is needed. Don't commit
+to B or C until a week of real sessions has produced hook_log data.
+
+---
+
 **Phase 1 exit criteria** (gate_phase1_notes is the checkpoint):
 
 Phase 1 starts with tens of hand-written memories. Ranking, top-K, and the token budget are not meaningfully exercised until Phase 3 has enough memories to make truncation real. The exit question is friction, not correctness: *did explicit capture and the review loop feel light enough that I actually used it for a week?*

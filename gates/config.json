@@ -23,16 +23,21 @@
   "interpreter_floor_ms": 1700,
   "_comment_kill_switch_headroom": "Added to interpreter_floor_ms to get kill_threshold. 800ms covers stdlib imports (json/os/sys) plus Defender scan headroom. Total: floor(1700) + headroom(800) = 2500ms.",
   "kill_switch_headroom_ms": 800,
-  "_comment_daemon_trigger": "Thresholds for the Phase 4 daemon decision. The daemon is justified if Stop hooks are being KILLED often enough to lose real memories — not because a millisecond number crosses an arbitrary line. Primary metric: stop_drop_rate_pct from hook_log (Stop events / UserPromptSubmit events). Secondary: duration_warn_ms for within-Python DB perf. min_hook_events: don't trigger recommendations until there's enough data.",
+  "_comment_daemon_trigger": "Two independent trigger paths for the Phase 4 daemon: (1) data-loss trigger from hook_log drop rate — daemon is justified if Stop hooks are being killed often enough to lose real memories; (2) latency trigger from doctor's live spawn measurement — daemon is justified if every turn has a noticeable pause even though no data is being lost. Both are needed: drop rate alone reads 0% while the tool is annoying enough to stop using.",
   "daemon_trigger": {
+    "_section_data_loss": "--- data-loss trigger (from hook_log Stop/UPS ratio) ---",
     "stop_drop_warn_pct": 2.0,
-    "_comment_stop_drop_warn": "Stop/UPS ratio below (100 - 2)% → warn that candidates are being lost. Rationale: 1 in 50 turns is the pain threshold — occasional spikes are noise; persistent 2%+ means the timeout is too tight for the machine. Threshold set 2026-09-23 BEFORE real data; revisit after 50+ real sessions.",
+    "_comment_stop_drop_warn": "Stop/UPS ratio below 98% over 50+ events → warn. 1 in 50 turns losing a candidate is the pain threshold. Set 2026-09-23 before real data; revisit after a week of sessions.",
     "stop_drop_daemon_pct": 5.0,
-    "_comment_stop_drop_daemon": "Stop/UPS ratio below 95% over 50+ events → recommend daemon. Rationale: 1 in 20 turns losing a candidate is unacceptable for a memory tool. At this rate the cost of the daemon (implementation complexity, IPC overhead) is clearly justified. Set before real data; revisit after 50+ sessions.",
-    "duration_warn_ms": 200,
-    "_comment_duration_warn": "hook_log.duration_ms p50 above this → DB or retrieval is unusually slow (separate from spawn cost). Normal within-Python work is 50-100ms; 200ms suggests a problem.",
+    "_comment_stop_drop_daemon": "Stop/UPS ratio below 95% → recommend daemon. 1 in 20 turns losing a candidate is unacceptable for a memory tool.",
     "min_hook_events": 50,
-    "_comment_min_events": "Minimum hook_log entries (across both Stop and UserPromptSubmit) before drop-rate recommendations fire. Raised from 20 to 50 — need a real week of sessions to distinguish a fluke spike from a structural problem.",
-    "_removed_spawn_thresholds": "spawn_warn_ms and spawn_daemon_ms removed 2026-09-23. Those thresholds were set against the broken state (5s timeout, unoptimised commands) and were already tripped before the cheap fixes landed. Daemon justification is about lost data, not spawn latency."
+    "_comment_min_events": "Minimum hook_log entries before drop-rate recommendations fire. A week of real sessions.",
+    "_section_latency": "--- latency trigger (from doctor live spawn measurement) ---",
+    "spawn_warn_ms": 2000,
+    "_comment_spawn_warn": "Doctor measures interpreter spawn floor (python -c pass, x5, p50). Above 2000ms → warn. Rationale: post-exclusion target is ~1500ms; 2000ms means exclusions haven't been applied or aren't working. The 10s Stop timeout prevents data loss but does NOT make 2-5s pauses acceptable. Set against the POST-FIX target state, not the broken 5154ms state.",
+    "spawn_daemon_ms": 3500,
+    "_comment_spawn_daemon": "Spawn floor p50 persistently above 3500ms → recommend daemon. Rationale: 3500ms per turn × 10 turns = 35s added latency per session. At that rate the tool's cost exceeds its value for most sessions. This threshold will be tripped in the broken state (5154ms) but should fall BELOW after exclusions land (~estimated 3000-3200ms, pending measurement). If post-exclusion spawn is still >3500ms, the daemon is the only remaining lever. Set 2026-09-23; mark as provisional until first post-exclusion measurement replaces the ⚠️ estimate in FACTS.md.",
+    "duration_warn_ms": 200,
+    "_comment_duration_warn": "hook_log.duration_ms p50 above this → DB or retrieval is unusually slow (separate from spawn). Normal within-Python work is ~55ms; 200ms suggests a DB issue."
   }
 }

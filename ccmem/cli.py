@@ -212,6 +212,23 @@ def _read_defender_exclusion_paths() -> list[str] | None:
         return None
 
 
+def _measure_spawn_floor_ms(runs: int = 5) -> float:
+    """Measure interpreter spawn floor: subprocess.run([sys.executable, '-c', 'pass']).
+
+    Returns median elapsed ms over `runs` trials. This is the irreducible per-turn
+    cost every hook pays before doing any Python work. Does NOT include hook logic.
+    """
+    import subprocess as _sp
+    import statistics as _stat
+    import time as _time
+    times = []
+    for _ in range(runs):
+        t0 = _time.perf_counter()
+        _sp.run([sys.executable, "-c", "pass"], capture_output=True)
+        times.append((_time.perf_counter() - t0) * 1000)
+    return _stat.median(times)
+
+
 def _check_defender_exclusions() -> None:
     """Check whether Defender path exclusions are in place for ccmem hooks."""
     hooks_dir = os.path.join(
@@ -279,6 +296,29 @@ def cmd_doctor(args):
 
     # Check whether settings.json hook commands use the Windows Store stub.
     _check_store_stub()
+
+    # Measure live spawn floor and compare to thresholds.
+    # This is the irreducible per-turn cost before any hook logic runs.
+    # The 10s Stop timeout prevents data loss but does not make a 5s pause fast.
+    import json as _json
+    _cfg_path = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) / "gates" / "config.json"
+    _daemon_cfg = {}
+    try:
+        _daemon_cfg = _json.loads(_cfg_path.read_text()).get("daemon_trigger", {})
+    except Exception:
+        pass
+    _spawn_warn = _daemon_cfg.get("spawn_warn_ms", 2000)
+    _spawn_daemon = _daemon_cfg.get("spawn_daemon_ms", 3500)
+    print("Measuring spawn floor (5 runs of python -c pass)...", flush=True)
+    _spawn_p50 = _measure_spawn_floor_ms(runs=5)
+    _spawn_status = (
+        "OK" if _spawn_p50 < _spawn_warn
+        else ("WARN" if _spawn_p50 < _spawn_daemon else "DAEMON RECOMMENDED")
+    )
+    print(f"  spawn floor p50: {_spawn_p50:.0f}ms  [{_spawn_status}]  (warn>{_spawn_warn}ms  daemon>{_spawn_daemon}ms)")
+    if _spawn_p50 >= _spawn_warn:
+        print(f"  NOTE: 10s Stop timeout prevents data loss but does not make {_spawn_p50:.0f}ms pauses fast.")
+        print( "  NOTE: Apply Defender path exclusions to reduce spawn cost (see below).")
 
     # Check whether Defender path exclusions are in place.
     # Path exclusions save ~37% on spawn cost during active OneDrive sync.
