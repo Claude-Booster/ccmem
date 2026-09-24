@@ -472,8 +472,8 @@ then the refresh removed it.
 **Consequences:**
 - User-applied Defender exclusions are not a viable permanent fix on this machine.
   Re-applying is whack-a-mole against the policy refresh.
-- The sustained (no-exclusion) state is the real baseline: floor ~1707ms active sync,
-  production ~5154ms. The 1243ms/3056ms figures are achievable only transiently.
+- There is no stable "sustained state" number — see the variance finding below. The
+  1243ms/3056ms figures are transient, and so is any single-session number.
 - The `doctor` revert-detection (defender_state.json + timing comparison) caught this
   on day one — working as designed. But there is no durable "good" baseline to save,
   so `--save-baseline` should not be run here.
@@ -487,6 +487,36 @@ then the refresh removed it.
 - **Option C (pre-warmed daemon):** most complex; gated on measured drop rate.
 - **Request IT to add the exclusion to the Intune policy:** slow, uncertain, not worth
   it for a personal dev tool.
+
+### Defender exclusion effect is within measurement noise (2026-09-24)
+
+The exclusion was never a real latency lever. Production Stop-path p50 across three
+measurement sessions:
+
+| State | Production p50 | Session floor |
+|---|---|---|
+| No exclusion (2026-09-23, earlier) | 5154ms | ~1707ms |
+| Lib exclusion applied (2026-09-23) | 3056ms | 1243ms |
+| Exclusion reverted (2026-09-24) | 2598ms | ~2300ms |
+
+⚠️ **These are single-session p50s and must not be compared as if stable.** Today's
+*exclusion-gone* p50 (2598ms) is **lower** than yesterday's *exclusion-applied* p50
+(3056ms), and the floor moved the opposite way. The Defender exclusion's measured
+effect (~430ms in the isolated 8-run test) sits **inside** ±1000–2000ms of
+run-to-run system/OneDrive-sync variance. For two days we read signal into noise.
+
+What survives:
+- The **revert is confirmed** via `Get-MpPreference` (observation, not inference).
+- The **"back to ~5s" magnitude is not supported** — production is ~2.6s today,
+  swinging 1.5–3.8s run to run.
+- The per-turn spawn is multi-second, variable, and **not reliably reducible** —
+  exclusions revert (policy) *and* their effect is within noise (measurement). The
+  only robust fix is to stop spawning per turn → snapshot-driven capture (Option B).
+
+**Rule going forward:** any latency claim in this project must rest on a
+distribution (min/p50/p90/max over ≥8 runs in one session), never a single-session
+p50 compared against another session's single-session p50. The spawn cost is too
+noisy for point comparisons.
 
 ### Findings on other hypotheses
 
