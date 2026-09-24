@@ -270,7 +270,9 @@ def _measure_spawn_floor_ms(runs: int = 5) -> float:
     return _stat.median(times)
 
 
-def _check_defender_exclusions(home: str, spawn_floor_ms: float | None = None) -> None:
+def _check_defender_exclusions(
+    home: str, spawn_floor_ms: float | None = None, save_baseline: bool = False
+) -> None:
     """Check Defender path exclusions are in place and have not been reverted by policy.
 
     On Intune/Group Policy managed machines, Add-MpPreference can be silently reverted
@@ -327,7 +329,20 @@ def _check_defender_exclusions(home: str, spawn_floor_ms: float | None = None) -
     else:
         # Registry unreadable — use timing as evidence
         print("  Defender exclusion — registry unreadable (admin required for HKLM)")
-        if saved_state.get("confirmed_floor_ms") and spawn_floor_ms is not None:
+        if save_baseline and spawn_floor_ms is not None:
+            # User has confirmed the Lib exclusion out-of-band (admin one-liner). Record
+            # this floor as the baseline for future timing-regression detection. This is
+            # the only path a non-admin user has to populate the baseline, since they can
+            # never read the HKLM Defender key themselves.
+            prev = saved_state.get("confirmed_floor_ms")
+            _save_defender_state(home, list(intended.values()), spawn_floor_ms)
+            print(f"  Baseline saved: floor {spawn_floor_ms:.0f}ms recorded as confirmed (registry not read; trusting your confirmation).")
+            if prev:
+                print(f"  (previous baseline was {prev}ms)")
+            if spawn_floor_ms >= 2000:
+                print(f"  WARN: {spawn_floor_ms:.0f}ms is high for a Lib-excluded floor (expected ~1200-1600ms).")
+                print("  WARN: If the system is under load right now, re-run --save-baseline on a quiet system for a cleaner baseline.")
+        elif saved_state.get("confirmed_floor_ms") and spawn_floor_ms is not None:
             confirmed_floor = saved_state["confirmed_floor_ms"]
             at = saved_state.get("confirmed_at", "unknown time")[:19]
             ratio = spawn_floor_ms / confirmed_floor
@@ -341,7 +356,8 @@ def _check_defender_exclusions(home: str, spawn_floor_ms: float | None = None) -
             at = saved_state.get("confirmed_at", "unknown time")[:19]
             print(f"  Last confirmed: {at} — run doctor with admin rights to re-verify registry state.")
         else:
-            print("  No confirmed baseline yet. Run doctor with admin rights after applying Lib exclusion to save baseline.")
+            print("  No confirmed baseline yet. Confirm Lib exclusion (admin: (Get-MpPreference).ExclusionPath),")
+            print("  then run: python -m ccmem.cli doctor --save-baseline")
 
     # Show apply instructions only when the registry confirms the exclusion is missing.
     # When the registry is unreadable, we cannot determine whether the exclusion is
@@ -400,8 +416,10 @@ def cmd_doctor(args):
         pass
     _spawn_warn = _daemon_cfg.get("spawn_warn_ms", 2000)
     _spawn_daemon = _daemon_cfg.get("spawn_daemon_ms", 3500)
-    print("Measuring spawn floor (5 runs of python -c pass)...", flush=True)
-    _spawn_p50 = _measure_spawn_floor_ms(runs=5)
+    _save_baseline = getattr(args, "save_baseline", False)
+    _runs = 15 if _save_baseline else 5
+    print(f"Measuring spawn floor ({_runs} runs of python -c pass)...", flush=True)
+    _spawn_p50 = _measure_spawn_floor_ms(runs=_runs)
     _spawn_status = (
         "OK" if _spawn_p50 < _spawn_warn
         else ("WARN" if _spawn_p50 < _spawn_daemon else "DAEMON RECOMMENDED")
@@ -413,7 +431,7 @@ def cmd_doctor(args):
 
     # Check whether Defender path exclusions are in place and have not been reverted.
     # Passes spawn floor so the saved baseline can be updated when all exclusions are OK.
-    _check_defender_exclusions(home, spawn_floor_ms=_spawn_p50)
+    _check_defender_exclusions(home, spawn_floor_ms=_spawn_p50, save_baseline=_save_baseline)
 
     if not db_path.exists():
         print("Run: python -m ccmem.cli add ... to create it.")
@@ -494,7 +512,13 @@ def main():
     inj.add_argument("--dry-run", action="store_true")
     inj.add_argument("--project-root")
 
-    sub.add_parser("doctor", help="health check")
+    doc = sub.add_parser("doctor", help="health check")
+    doc.add_argument(
+        "--save-baseline", action="store_true",
+        help="record the current spawn floor as the confirmed Defender baseline. Use after "
+             "manually confirming the Lib exclusion is applied (admin: (Get-MpPreference).ExclusionPath). "
+             "For non-admin users who cannot read the HKLM registry directly. Measures 15 runs for stability.",
+    )
 
     args = p.parse_args()
     dispatch = {
