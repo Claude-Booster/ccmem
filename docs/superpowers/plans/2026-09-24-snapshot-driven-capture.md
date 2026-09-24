@@ -41,7 +41,7 @@
 - Test: `tests/test_schema_migration.py` (create)
 
 **Interfaces:**
-- Produces: `candidates.content_hash TEXT` with `UNIQUE INDEX idx_candidates_content_hash`; tables `transcript_progress(transcript_path TEXT PRIMARY KEY, last_prompt_id TEXT, last_ordinal INTEGER, session_id TEXT, updated_at TEXT)` and `sigil_refusals(id TEXT PRIMARY KEY, transcript_path TEXT, session_id TEXT, created_at TEXT, excerpt TEXT, surfaced INTEGER DEFAULT 0)`; `schema_meta` key `initialized_at`; `connect()` sets `PRAGMA busy_timeout=3000`.
+- Produces: `candidates.content_hash TEXT` with `UNIQUE INDEX idx_candidates_content_hash`; `memories.content_hash TEXT` with `UNIQUE INDEX idx_memories_content_hash` (sigil idempotency — Task 5); tables `transcript_progress(transcript_path TEXT PRIMARY KEY, last_prompt_id TEXT, last_ordinal INTEGER, session_id TEXT, updated_at TEXT)` and `sigil_refusals(id TEXT PRIMARY KEY, transcript_path TEXT, session_id TEXT, created_at TEXT, excerpt TEXT, acknowledged_at TEXT)`; `schema_meta` key `initialized_at`; `connect()` sets `PRAGMA busy_timeout=3000`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -56,12 +56,16 @@ def _cols(con, table):
 def test_new_schema_objects_exist():
     con = connect(":memory:"); migrate(con)
     assert "content_hash" in _cols(con, "candidates")
+    assert "content_hash" in _cols(con, "memories")
+    assert "acknowledged_at" in _cols(con, "sigil_refusals")
     for t in ("transcript_progress", "sigil_refusals"):
         assert con.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (t,)
         ).fetchone(), f"{t} missing"
-    idx = {r[1] for r in con.execute("PRAGMA index_list(candidates)")}
-    assert "idx_candidates_content_hash" in idx
+    cidx = {r[1] for r in con.execute("PRAGMA index_list(candidates)")}
+    midx = {r[1] for r in con.execute("PRAGMA index_list(memories)")}
+    assert "idx_candidates_content_hash" in cidx
+    assert "idx_memories_content_hash" in midx
     assert con.execute(
         "SELECT value FROM schema_meta WHERE key='initialized_at'"
     ).fetchone() is not None
@@ -109,7 +113,7 @@ CREATE TABLE IF NOT EXISTS sigil_refusals (
     session_id      TEXT,
     created_at      TEXT NOT NULL,
     excerpt         TEXT NOT NULL,
-    surfaced        INTEGER NOT NULL DEFAULT 0
+    acknowledged_at TEXT
 );
 ```
 
@@ -118,7 +122,13 @@ Add after the `hook_log` block, before the `INSERT OR IGNORE` seeds:
 ```sql
 CREATE UNIQUE INDEX IF NOT EXISTS idx_candidates_content_hash
     ON candidates(content_hash);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_content_hash
+    ON memories(content_hash);
 ```
+
+(A `UNIQUE` index permits multiple NULLs in SQLite, so manual memories from
+`cmd_add` — which do not set `content_hash` — are unaffected; only sigil memories,
+which set it, dedup.)
 
 Change the seed section to record init time once and bump version:
 
@@ -128,14 +138,15 @@ INSERT OR IGNORE INTO schema_meta VALUES ('embedding_dim', '384');
 INSERT OR IGNORE INTO schema_meta VALUES ('initialized_at', strftime('%Y-%m-%dT%H:%M:%SZ','now'));
 ```
 
-In `migrate`, add an idempotent column add for pre-v2 DBs (mirrors the hook_log pattern):
+In `migrate`, add idempotent column adds for pre-v2 DBs (mirrors the hook_log pattern):
 
 ```python
-    try:
-        con.execute("ALTER TABLE candidates ADD COLUMN content_hash TEXT")
-        con.commit()
-    except Exception:
-        pass  # column already exists
+    for tbl in ("candidates", "memories"):
+        try:
+            con.execute(f"ALTER TABLE {tbl} ADD COLUMN content_hash TEXT")
+            con.commit()
+        except Exception:
+            pass  # column already exists
 ```
 
 In `connect`, add after the existing PRAGMAs:
@@ -146,14 +157,14 @@ In `connect`, add after the existing PRAGMAs:
 
 - [ ] **Step 4: Update the schema-contract gate**
 
-In `gates/gate_schema_contract.py`, add `"content_hash"` to the `candidates` list in **both** `EXPECTED_TABLES` (line ~32) and `GATE_COLUMN_REFERENCES` (line ~64), and add two entries to `EXPECTED_TABLES`:
+In `gates/gate_schema_contract.py`, add `"content_hash"` to the `candidates` list and to the `memories` list in **both** `EXPECTED_TABLES` (lines ~26, ~32) and `GATE_COLUMN_REFERENCES` (lines ~52, ~64), and add two entries to `EXPECTED_TABLES`:
 
 ```python
     "transcript_progress": [
         "transcript_path", "last_prompt_id", "last_ordinal", "session_id", "updated_at",
     ],
     "sigil_refusals": [
-        "id", "transcript_path", "session_id", "created_at", "excerpt", "surfaced",
+        "id", "transcript_path", "session_id", "created_at", "excerpt", "acknowledged_at",
     ],
 ```
 
@@ -183,8 +194,8 @@ git commit -m "feat(db): schema v2 — content_hash dedup, transcript_progress, 
 **Interfaces:**
 - Produces:
   - `normalize_transcript_path(path: str) -> str`
-  - `TurnPair` dataclass: `prompt_id: str | None`, `ordinal: int`, `user_turn: str`, `assistant_turn: str`, `cwd: str | None`
-  - `iter_turn_pairs(transcript_path: str) -> Iterator[TurnPair]` — yields pairs in order; skips malformed lines; `ordinal` is the 0-based index of the `user` record.
+  - `TurnPair` dataclass: `prompt_id: str | None`, `ordinal: int`, `user_turn: str`, `assistant_turn: str`, `cwd: str | None`, `timestamp: str | None`
+  - `iter_turn_pairs(transcript_path: str) -> Iterator[TurnPair]` — yields pairs in order; skips malformed lines; `ordinal` is the 0-based index of the `user` record; `timestamp` is the user record's `timestamp` field (used for the per-turn install bound, finding #4).
 
 - [ ] **Step 1: Create fixtures**
 
@@ -260,6 +271,7 @@ class TurnPair:
     user_turn: str
     assistant_turn: str
     cwd: str | None
+    timestamp: str | None
 
 
 def _text_blocks(rec: dict) -> str:
@@ -299,14 +311,16 @@ def iter_turn_pairs(transcript_path: str) -> Iterator[TurnPair]:
             if rtype == "user":
                 if pending is not None:
                     yield TurnPair(pending[0], pending[1], pending[2],
-                                   "".join(asst), pending[3])
+                                   "".join(asst), pending[3], pending[4])
                 ordinal += 1
-                pending = (rec.get("promptId"), ordinal, _text_blocks(rec), rec.get("cwd"))
+                pending = (rec.get("promptId"), ordinal, _text_blocks(rec),
+                           rec.get("cwd"), rec.get("timestamp"))
                 asst = []
             elif rtype == "assistant" and pending is not None:
                 asst.append(_text_blocks(rec))
         if pending is not None:
-            yield TurnPair(pending[0], pending[1], pending[2], "".join(asst), pending[3])
+            yield TurnPair(pending[0], pending[1], pending[2], "".join(asst),
+                           pending[3], pending[4])
 ```
 
 - [ ] **Step 5: Run tests**
@@ -393,6 +407,30 @@ def test_empty_transcript_no_drift(tmp_path):
     p = tmp_path / "e.jsonl"; p.write_text("", encoding="utf-8")
     r = capture_transcript(_db(), str(p), "s1")
     assert r.candidates == 0 and r.promptid_drift is False
+
+def test_pre_install_turns_skipped_by_timestamp(tmp_path):
+    import json as _j
+    con = _db()
+    init_at = con.execute(
+        "SELECT value FROM schema_meta WHERE key='initialized_at'").fetchone()[0]
+    def line(ts, txt, role="user", pid="p"):
+        rec = {"type": role, "message": {"content": [{"type": "text", "text": txt}]}}
+        if role == "user":
+            rec["promptId"] = pid; rec["timestamp"] = ts; rec["cwd"] = "C:\\p"
+        else:
+            rec["apiBlockIndex"] = 0
+        return _j.dumps(rec)
+    p = tmp_path / "resumed.jsonl"
+    p.write_text("\n".join([
+        line("2000-01-01T00:00:00Z", "we decided to use OLD", "user", "p0"),
+        line("", "the approach is OLD", "assistant"),
+        line("2999-01-01T00:00:00Z", "we decided to use NEW", "user", "p1"),
+        line("", "the approach is NEW", "assistant"),
+    ]), encoding="utf-8")
+    r = capture_transcript(con, str(p), "s1")
+    assert r.candidates == 1
+    (txt,) = con.execute("SELECT user_turn FROM candidates").fetchone()
+    assert "NEW" in txt and "OLD" not in txt
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -474,9 +512,17 @@ def _write_hwm(con, norm_path, session_id, last_prompt_id, last_ordinal):
     con.commit()
 
 
+def _initialized_at(con) -> str:
+    row = con.execute(
+        "SELECT value FROM schema_meta WHERE key='initialized_at'"
+    ).fetchone()
+    return row[0] if row else "1970-01-01T00:00:00Z"
+
+
 def capture_transcript(con, transcript_path, session_id, is_pre_compact=False):
     norm = normalize_transcript_path(transcript_path)
     last_pid, last_ord = _read_hwm(con, norm)
+    init_at = _initialized_at(con)
     result = CaptureResult()
     threshold = float(os.environ.get("CCMEM_THRESHOLD", "4"))
     seen_pid = seen_user = 0
@@ -490,6 +536,14 @@ def capture_transcript(con, transcript_path, session_id, is_pre_compact=False):
         # the HWM pointer and used only for drift detection — this is why mixed
         # promptId presence (change #7) cannot cause a skip or re-process.
         if pair.ordinal <= last_ord:
+            continue
+        # Per-turn install bound (finding #4): skip turns from before ccmem existed,
+        # even in a resumed pre-install session whose file mtime is now current.
+        # A missing/unparseable timestamp is treated as post-install (captured).
+        if pair.timestamp is not None and pair.timestamp < init_at:
+            max_ord = max(max_ord, pair.ordinal)   # advance HWM past it; never capture
+            if pair.prompt_id is not None:
+                max_pid = pair.prompt_id
             continue
         # (Task 5 inserts sigil handling here, before the candidate path.)
         score = score_turn(pair.user_turn, pair.assistant_turn)
@@ -537,30 +591,39 @@ git commit -m "feat(capture): capture_transcript with full-text content_hash ded
 - Test: `tests/test_killswitch.py` (create)
 
 **Interfaces:**
-- Consumes: `normalize_transcript_path` (Task 2).
 - Produces:
-  - `mark_disabled(home: str, transcript_path: str) -> None`
-  - `is_disabled(home: str, transcript_path: str) -> bool`
+  - `session_id_from_transcript(transcript_path: str) -> str` — the filename stem (FACTS §4: `<munged>/<session-uuid>.jsonl`).
+  - `mark_disabled(home: str, session_id: str) -> bool` — returns True on success, False if the marker could not be written (finding #2).
+  - `is_disabled(home: str, session_id: str) -> bool`
+
+**Why session_id, not path (finding #1):** the marker is written at SessionStart, when
+the transcript file may not exist yet. `os.path.realpath` resolves 8.3/symlink
+components differently for an absent vs. present file, so a path-keyed marker could fail
+to match the sweep's later normalization and the disabled session would be swept anyway.
+`session_id` is existence- and spelling-independent; the sweep derives the same value
+from the transcript filename stem.
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/test_killswitch.py
-from ccmem.killswitch import mark_disabled, is_disabled
+import os
+from ccmem.killswitch import mark_disabled, is_disabled, session_id_from_transcript
 
-def test_mark_then_detect(tmp_path):
+def test_mark_then_detect_by_session_id(tmp_path):
     home = str(tmp_path)
-    t = str(tmp_path / "sess.jsonl"); open(t, "w").close()
-    assert is_disabled(home, t) is False
-    mark_disabled(home, t)
-    assert is_disabled(home, t) is True
+    assert is_disabled(home, "sess-uuid-1") is False
+    assert mark_disabled(home, "sess-uuid-1") is True
+    assert is_disabled(home, "sess-uuid-1") is True
 
-def test_detect_is_path_normalized(tmp_path):
-    home = str(tmp_path)
-    t = str(tmp_path / "sess.jsonl"); open(t, "w").close()
-    mark_disabled(home, t)
-    variant = t.upper() if __import__("os").name == "nt" else t
-    assert is_disabled(home, variant) is True
+def test_session_id_from_filename():
+    assert session_id_from_transcript(
+        os.path.join("x", "projects", "munged", "abc-123.jsonl")) == "abc-123"
+
+def test_mark_returns_false_when_unwritable(tmp_path, monkeypatch):
+    # point home at a path that cannot be created (a file, not a dir)
+    bad = tmp_path / "not_a_dir"; bad.write_text("x")
+    assert mark_disabled(str(bad), "s1") is False
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -575,31 +638,36 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
-from ccmem.transcript import normalize_transcript_path
 
 _DIR = "disabled"
 
 
-def _marker(home: str, transcript_path: str) -> Path:
-    key = hashlib.sha256(
-        normalize_transcript_path(transcript_path).encode("utf-8", "replace")
-    ).hexdigest()
+def session_id_from_transcript(transcript_path: str) -> str:
+    """FACTS §4: the transcript filename stem is the session-uuid."""
+    return os.path.splitext(os.path.basename(transcript_path))[0]
+
+
+def _marker(home: str, session_id: str) -> Path:
+    key = hashlib.sha256(session_id.encode("utf-8", "replace")).hexdigest()
     return Path(home) / _DIR / key
 
 
-def mark_disabled(home: str, transcript_path: str) -> None:
-    """Tombstone a transcript so no future sweep captures from it. Not capture."""
+def mark_disabled(home: str, session_id: str) -> bool:
+    """Tombstone a session so no future sweep captures its transcript. Not capture.
+    Returns True on success; False if the marker could not be written (finding #2 —
+    the caller surfaces a systemMessage in that case)."""
     try:
-        m = _marker(home, transcript_path)
+        m = _marker(home, session_id)
         m.parent.mkdir(parents=True, exist_ok=True)
         m.touch(exist_ok=True)
+        return m.exists()
     except Exception:
-        pass  # R1: never raise from a hook path
+        return False
 
 
-def is_disabled(home: str, transcript_path: str) -> bool:
+def is_disabled(home: str, session_id: str) -> bool:
     try:
-        return _marker(home, transcript_path).exists()
+        return _marker(home, session_id).exists()
     except Exception:
         return False
 ```
@@ -613,7 +681,7 @@ Expected: PASS.
 
 ```bash
 git add ccmem/killswitch.py tests/test_killswitch.py
-git commit -m "feat(killswitch): disabled-transcript marker so recovery never captures a CCMEM_DISABLED session"
+git commit -m "feat(killswitch): session_id-keyed disabled marker (existence-independent) so recovery never captures a CCMEM_DISABLED session"
 ```
 
 ---
@@ -688,10 +756,12 @@ In `capture_transcript`, replace the comment `# (Task 5 inserts sigil handling h
 ```python
         sigil_text, sigil_scope, _ = extract_sigil(pair.user_turn)
         if sigil_text is not None:
-            if _handle_sigil(con, pair, sigil_text, sigil_scope, session_id, norm):
+            wrote, refused = _handle_sigil(con, pair, sigil_text, sigil_scope, session_id, norm)
+            if wrote:
                 result.sigil_memories += 1
-            else:
+            elif refused:
                 result.refusals += 1
+            # deduped no-op: neither counter moves
             max_ord = max(max_ord, pair.ordinal)
             if pair.prompt_id is not None:
                 max_pid = pair.prompt_id
@@ -701,9 +771,11 @@ In `capture_transcript`, replace the comment `# (Task 5 inserts sigil handling h
 Add the helper:
 
 ```python
-def _handle_sigil(con, pair, text, scope, session_id, norm_path) -> bool:
-    """Write a durable memory, or record a refusal if it contains a secret.
-    Returns True if a memory was written, False if refused."""
+def _handle_sigil(con, pair, text, scope, session_id, norm_path):
+    """Write a durable memory, record a refusal, or dedup.
+    Returns (wrote: bool, refused: bool): (True,False) inserted, (False,True) refused,
+    (False,False) deduped no-op."""
+    import hashlib
     from ccmem.redact import redact
     from ccmem.supersession import maybe_supersede
     from ccmem.scoping import project_key, resolve_project_root
@@ -716,24 +788,32 @@ def _handle_sigil(con, pair, text, scope, session_id, norm_path) -> bool:
              datetime.now(timezone.utc).isoformat(), redacted[:200]),
         )
         con.commit()
-        return False
-    h = content_hash("!mem", redacted)
+        return (False, True)
+    h = hashlib.sha256(redacted.encode("utf-8", "replace")).hexdigest()
     root = resolve_project_root(pair.cwd or os.getcwd())
     pid, _ = project_key(root)
     mem_id = str(uuid.uuid4())
+    before = con.total_changes
     con.execute(
         "INSERT OR IGNORE INTO memories "
-        "(id, type, content, scope, project_id, project_root, created_at, status, subject) "
+        "(id, type, content, scope, project_id, project_root, created_at, status, content_hash) "
         "VALUES (?,?,?,?,?,?,?,?,?)",
         (mem_id, "preference", redacted, scope or "project", pid, root,
          datetime.now(timezone.utc).isoformat(), "active", h),
     )
     con.commit()
+    if con.total_changes == before:
+        return (False, False)  # deduped by content_hash — identical sigil already stored
     maybe_supersede(con, mem_id, None, pid)
-    return True
+    return (True, False)
 ```
 
-Note: `subject` carries the content hash so a re-processed sigil record de-dups via `maybe_supersede`/`INSERT OR IGNORE` semantics; the HWM normally prevents re-processing anyway. If the schema-contract gate objects to reusing `subject` this way, add a dedicated `content_hash` column to `memories` in Task 1 instead — but `subject` already exists and `maybe_supersede` keys on it, so this is the minimal change.
+Note: idempotency keys on `memories.content_hash` (Task 1), **not** on `subject`.
+`subject` is `maybe_supersede`'s matching key — its purpose is to match *different*
+sigils that share a subject, so using it as a dedup key would drop two distinct sigils
+about the same subject, and any change to the subject extractor would silently change
+idempotency. `maybe_supersede` still runs (genuine subject-based supersession) only when
+a new row was actually inserted.
 
 - [ ] **Step 5: Run tests + gates**
 
@@ -958,8 +1038,11 @@ def test_clean_transcript_zero_reads(tmp_path):
     assert r.candidates == 0
 
 def test_disabled_transcript_never_swept(tmp_path):
-    con = _db(); p = _copy(tmp_path, "basic.jsonl", "basic.jsonl")
-    mark_disabled(str(tmp_path), p)
+    con = _db()
+    # mark disabled by session_id BEFORE the transcript file exists (finding #1),
+    # then create the file and sweep — it must still be skipped.
+    mark_disabled(str(tmp_path), "basic")   # session_id == filename stem
+    _copy(tmp_path, "basic.jsonl", "basic.jsonl")
     r = recover_project(con, str(tmp_path), str(tmp_path), "2000-01-01T00:00:00Z", 10_000_000, 5000)
     assert r.candidates == 0
 
@@ -992,7 +1075,7 @@ import glob
 import os
 import time
 from ccmem.capture import CaptureResult, capture_transcript, normalize_transcript_path
-from ccmem.killswitch import is_disabled
+from ccmem.killswitch import is_disabled, session_id_from_transcript
 
 
 def _updated_at(con, norm_path):
@@ -1023,14 +1106,15 @@ def recover_project(con, home, project_dir, initialized_at, max_bytes, max_ms) -
             continue
         mtime_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(st.st_mtime))
         if mtime_iso <= initialized_at:
-            continue  # predates ccmem install
-        if is_disabled(home, f):
-            continue  # kill switch
+            continue  # stat-only prefilter; the real bound is per-turn in capture_transcript
+        sid = session_id_from_transcript(f)
+        if is_disabled(home, sid):
+            continue  # kill switch (session_id-keyed, finding #1)
         norm = normalize_transcript_path(f)
         ua = _updated_at(con, norm)
         if ua is not None and mtime_iso <= ua:
             continue  # already current (stat-only, no read)
-        r = capture_transcript(con, f, session_id="recovery")
+        r = capture_transcript(con, f, session_id=sid)
         agg.candidates += r.candidates
         agg.sigil_memories += r.sigil_memories
         agg.refusals += r.refusals
@@ -1141,7 +1225,17 @@ def test_disabled_session_writes_marker_and_captures_nothing(tmp_path):
     p = _run({"hook_event_name":"SessionStart","transcript_path": t,"session_id":"s1","cwd": proj}, env)
     assert p.returncode == 0
     from ccmem.killswitch import is_disabled
-    assert is_disabled(home, t) is True
+    assert is_disabled(home, "s") is True  # marker keyed on filename stem "s" (s.jsonl)
+
+def test_disabled_marker_write_failure_warns(tmp_path):
+    # CCMEM_HOME points at a file, so the marker dir cannot be created -> loud (finding #2)
+    homefile = tmp_path / "homefile"; homefile.write_text("x")
+    proj = str(tmp_path / "proj"); os.makedirs(proj)
+    import shutil; t = os.path.join(proj, "s.jsonl"); shutil.copy(os.path.join(FIX, "basic.jsonl"), t)
+    env = {**os.environ, "CCMEM_HOME": str(homefile), "PYTHONPATH": REPO, "CCMEM_DISABLED": "1"}
+    p = _run({"hook_event_name":"SessionStart","transcript_path": t,"session_id":"s1","cwd": proj}, env)
+    assert p.returncode == 0
+    assert b"could not record" in p.stdout.lower()
 
 def test_refusal_surfaced_on_next_start(tmp_path):
     home = str(tmp_path / "home"); os.makedirs(home); _mkdb(home)
@@ -1152,7 +1246,7 @@ def test_refusal_surfaced_on_next_start(tmp_path):
     p = _run({"hook_event_name":"SessionStart","transcript_path": os.path.join(proj,"new.jsonl"),
               "session_id":"s2","cwd": proj}, env)
     assert p.returncode == 0
-    assert b"refused" in p.stdout.lower()
+    assert b"unreviewed" in p.stdout.lower() and b"refusal" in p.stdout.lower()
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1162,18 +1256,26 @@ Expected: FAIL (no marker written; no refusal surfaced; sweep not wired).
 
 - [ ] **Step 3: Rewrite `hooks/mem_inject.py` flow**
 
-Keep the R1 wrapper. At the top of the work section, handle the kill switch first:
+Keep the R1 wrapper. stdin can only be read once — the `CCMEM_DISABLED` block below reads it and returns, and the normal path reads it separately; ensure there is no earlier top-level `sys.stdin` read before this block. At the top of the work section, handle the kill switch first:
 
 ```python
     if os.environ.get("CCMEM_DISABLED"):
-        # Tombstone this session's transcript so no future sweep captures it.
+        # Tombstone this session so no future sweep captures its transcript.
+        # Key on the filename stem — the same key the sweep will derive (finding #1).
+        # If the marker cannot be written, be LOUD (finding #2): still exit 0, but
+        # tell the user the privacy guarantee is degraded.
         try:
             from ccmem.paths import resolve_home
-            from ccmem.killswitch import mark_disabled
+            from ccmem.killswitch import mark_disabled, session_id_from_transcript
             payload = json.loads(sys.stdin.buffer.read() or b"{}")
             t = payload.get("transcript_path")
             if t:
-                mark_disabled(resolve_home(), t)
+                sid = session_id_from_transcript(t)
+                if not mark_disabled(resolve_home(), sid):
+                    print(json.dumps({"hookSpecificOutput": {
+                        "hookEventName": "SessionStart"},
+                        "systemMessage": "ccmem is disabled but could not record a "
+                        "do-not-capture marker for this session; it may be captured later."}))
         except Exception:
             pass
         return
@@ -1182,23 +1284,29 @@ Keep the R1 wrapper. At the top of the work section, handle the kill switch firs
 Then, in the normal path, order the work sweep-first:
 
 ```python
-        # 1) recovery sweep BEFORE building injection, so refusals surface now
-        cwd = payload.get("cwd", os.getcwd())
-        project_dir = _project_transcript_dir(cwd)   # ~/.claude/projects/<munged>
-        init_at = _read_initialized_at(con)
-        rb = _cfg_recovery_budget()
-        swept = recover_project(con, home, project_dir, init_at, rb["max_bytes"], rb["max_ms"])
+        # 1) recovery sweep BEFORE building injection, so refusals surface now.
+        #    project dir comes straight from the payload's transcript_path (finding #9)
+        #    — no cwd-munging on the hook path. Wrap so a locked DB never breaks inject.
+        transcript = payload.get("transcript_path", "")
+        project_dir = os.path.dirname(transcript) if transcript else None
+        try:
+            if project_dir and os.path.isdir(project_dir):
+                rb = _cfg_recovery_budget()
+                recover_project(con, home, project_dir, _read_initialized_at(con),
+                                rb["max_bytes"], rb["max_ms"])
+        except Exception:
+            pass  # R1: a locked DB or sweep error must not break injection
 
-        # 2) build injection block (memories + refusal notice) and print once
+        # 2) build injection block (memories + refusal notice) and print once.
+        #    PURE READ of sigil_refusals — no mutation, so SessionStart stays
+        #    deterministic (finding #3). Acknowledgement is a CLI action (Task 14).
         blocks = []
         n_ref = con.execute(
-            "SELECT COUNT(*) FROM sigil_refusals WHERE surfaced=0"
+            "SELECT COUNT(*) FROM sigil_refusals WHERE acknowledged_at IS NULL"
         ).fetchone()[0]
         if n_ref:
-            blocks.append(f"{n_ref} !mem: write(s) were refused last session "
-                          f"(contained secrets) — run `ccmem list --refused`.")
-            con.execute("UPDATE sigil_refusals SET surfaced=1 WHERE surfaced=0")
-            con.commit()
+            blocks.append(f"{n_ref} unreviewed !mem: refusal(s) (contained secrets) "
+                          f"— run `ccmem list --refused`.")
         memories = retrieve(con, pid)
         if memories:
             blocks.append(render(memories, root, "session-start"))
@@ -1208,13 +1316,9 @@ Then, in the normal path, order the work sweep-first:
                 "additionalContext": "\n\n".join(blocks)}}))
 ```
 
-Add small helpers in the hook (or import from `ccmem.paths` if present):
+Add small helpers in the hook:
 
 ```python
-def _project_transcript_dir(cwd):
-    munged = cwd.replace(":", "").replace("\\", "-").replace("/", "-")
-    return os.path.join(os.path.expanduser("~"), ".claude", "projects", munged)
-
 def _read_initialized_at(con):
     row = con.execute("SELECT value FROM schema_meta WHERE key='initialized_at'").fetchone()
     return row[0] if row else "1970-01-01T00:00:00Z"
@@ -1228,9 +1332,9 @@ def _cfg_recovery_budget():
         return {"max_bytes": 10485760, "max_ms": 4000}
 ```
 
-Wrap the sweep in its own try/except so a locked DB or sweep error never breaks injection (R1): on failure, log nothing and continue to the injection step.
+The sweep is already wrapped in its own try/except above so a locked DB or sweep error never breaks injection (R1).
 
-Verify the munging matches FACTS §4 (`<munged-cwd>` = path separators → dashes). If the project already has a canonical munger in `ccmem/scoping.py` or `ccmem/paths.py`, import and use that instead of the inline `_project_transcript_dir` — check before implementing.
+Project-dir resolution (finding #9): the hook uses `os.path.dirname(transcript_path)` from the payload — no cwd-munging, no reverse-engineering of Claude Code's `<munged-cwd>` scheme. The single cwd→dir munger needed by `doctor` (which has no payload) is added to `ccmem/paths.py` in Task 14, with exactly one caller. Do not add a second munger here.
 
 - [ ] **Step 4: Run tests**
 
@@ -1440,13 +1544,15 @@ git commit -m "test(gate): SessionStart recovery stays within wall-clock budget 
 
 ---
 
-## Task 14: Doctor — reframe drop-rate, revert detection, refusals, promptId drift
+## Task 14: Doctor + `list --refused` + paths munger
 
 **Files:**
-- Modify: `ccmem/cli.py` (`cmd_doctor`, `_check_defender_exclusions`)
-- Test: `tests/test_cli_doctor.py` (extend if present, else create)
+- Modify: `ccmem/cli.py` (`cmd_doctor`, `_check_defender_exclusions`, add `cmd_list` `--refused`, register the flag)
+- Modify: `ccmem/paths.py` (add `project_transcript_dir(cwd)` — finding #9, doctor's only caller)
+- Test: `tests/test_cli_doctor.py`, `tests/test_cli_refused.py` (create)
 
-**Interfaces:** none produced; doctor output only.
+**Interfaces:**
+- Produces: `ccmem.paths.project_transcript_dir(cwd: str) -> str`; `ccmem list --refused` displays unacknowledged refusals and stamps `acknowledged_at`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1478,8 +1584,8 @@ Expected: FAIL (doctor does not mention refusals).
 - [ ] **Step 3: Implement doctor changes**
 
 In `cmd_doctor`:
-- Replace the Stop/UPS drop-rate block (~lines 457-463) with an **unrecovered-transcript** check: for the current project dir, count transcripts whose mtime is after their `transcript_progress.updated_at` (or absent) and after `initialized_at` and not disabled; report the count as "N transcript(s) awaiting capture (will sweep on next SessionStart)". This is the new data-loss signal.
-- Report sigil refusals: `SELECT COUNT(*) FROM sigil_refusals` → "Sigil refusals recorded: N (run `ccmem list --refused`)".
+- Replace the Stop/UPS drop-rate block (~lines 457-463) with an **unrecovered-transcript** check: resolve the project dir via `paths.project_transcript_dir(os.getcwd())` (Step 4), count transcripts whose mtime is after their `transcript_progress.updated_at` (or absent) and after `initialized_at` and not disabled; report "N transcript(s) awaiting capture (will sweep on next SessionStart)". This is the new data-loss signal.
+- Report sigil refusals: `SELECT COUNT(*) FROM sigil_refusals WHERE acknowledged_at IS NULL` (see Step 3 wording below).
 - promptId drift: run a `capture_transcript` dry probe is unnecessary; instead, if any recent transcript yields `promptid_drift`, print a hard-failure line: "FAIL: transcript schema drift — no promptId on any user record; capture is on ordinal fallback."
 
 In `_check_defender_exclusions`, add direct revert detection using `Get-MpPreference` (non-admin readable):
@@ -1507,16 +1613,68 @@ Compare against `defender_state.json`'s `confirmed_paths`; for any confirmed pat
         print( "  Policy-revert insurance on a managed machine, not a performance signal.")
 ```
 
-- [ ] **Step 4: Run tests + gates**
+Use `acknowledged_at IS NULL` for the refusal count (matches the SessionStart notice):
+`SELECT COUNT(*) FROM sigil_refusals WHERE acknowledged_at IS NULL` → "Unreviewed !mem: refusals: N (run `ccmem list --refused`)".
 
-Run: `python -m pytest tests/test_cli_doctor.py -v && python gates/run_gates.py --phase 1`
+- [ ] **Step 4: Add the `paths.project_transcript_dir` munger (finding #9)**
+
+Grep first (already done — nothing exists). Add to `ccmem/paths.py`:
+
+```python
+import re
+
+def project_transcript_dir(cwd: str) -> str:
+    """cwd -> ~/.claude/projects/<munged>/ . Claude Code lowercases the Windows
+    drive letter and replaces ':', path separators, spaces, and '.' with '-'.
+    FACTS §4 marks this scheme community/unstable — the hook path avoids it entirely
+    by using dirname(transcript_path); doctor is the only caller."""
+    if len(cwd) >= 2 and cwd[1] == ":":
+        cwd = cwd[0].lower() + cwd[1:]
+    munged = re.sub(r"[:\\/ .]", "-", cwd)
+    return os.path.join(os.path.expanduser("~"), ".claude", "projects", munged)
+```
+
+Add a fixture test asserting it produces the known dir for this repo's cwd
+(`C:\Users\<user>\OneDrive - <org>\Documents\ccmem` →
+`c--Users-<user>-OneDrive---<org>-Documents-ccmem`).
+
+- [ ] **Step 5: Add `ccmem list --refused`**
+
+In `main()`, add a `--refused` flag to the existing `list` subparser. In `cmd_list`,
+when `args.refused` is set, display unacknowledged refusals and stamp them:
+
+```python
+    if getattr(args, "refused", False):
+        con = _db(args)
+        rows = con.execute(
+            "SELECT id, created_at, excerpt FROM sigil_refusals "
+            "WHERE acknowledged_at IS NULL ORDER BY created_at"
+        ).fetchall()
+        if not rows:
+            print("No unreviewed !mem: refusals."); con.close(); return
+        now = datetime.now(timezone.utc).isoformat()
+        for rid, created, excerpt in rows:
+            print(f"[{created[:19]}] refused (secret): {excerpt}")
+            con.execute("UPDATE sigil_refusals SET acknowledged_at=? WHERE id=?", (now, rid))
+        con.commit(); con.close()
+        print(f"\nAcknowledged {len(rows)} refusal(s).")
+        return
+```
+
+Test `tests/test_cli_refused.py`: insert two refusals, run `cmd_list` with
+`args.refused=True`, assert both print and both get `acknowledged_at` stamped; a
+second run prints "No unreviewed" and stamps nothing (idempotent acknowledgement).
+
+- [ ] **Step 6: Run tests + gates**
+
+Run: `python -m pytest tests/test_cli_doctor.py tests/test_cli_refused.py -v && python gates/run_gates.py --phase 1`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add ccmem/cli.py tests/test_cli_doctor.py
-git commit -m "feat(doctor): unrecovered-transcript signal, sigil-refusal report, promptId-drift failure, direct revert detection"
+git add ccmem/cli.py ccmem/paths.py tests/test_cli_doctor.py tests/test_cli_refused.py
+git commit -m "feat(cli): doctor refusal/drift/revert signals; ccmem list --refused; paths.project_transcript_dir for doctor"
 ```
 
 ---
