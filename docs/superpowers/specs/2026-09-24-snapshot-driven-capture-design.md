@@ -71,7 +71,7 @@ Success criteria:
 
 | Event | Hook | Role |
 |---|---|---|
-| `SessionStart` | `mem_inject.py` | Inject memories (`additionalContext`); then bounded recovery sweep; then surface any sigil refusals from last session |
+| `SessionStart` | `mem_inject.py` | Bounded recovery sweep first; then build and print the injection block once, including any refusals the sweep just discovered |
 | `PreCompact` | `mem_snapshot.py` | Batch-capture new turns, mark captured rows `is_pre_compact=1` |
 | `SessionEnd` | `mem_flush.py` | Batch-capture new turns, WAL checkpoint |
 | `Stop` | — | Removed |
@@ -109,9 +109,22 @@ Per turn-pair reconstructed from the transcript (one `user` record + the followi
   `content_hash` (re-processing the same sigil record is a no-op).
 
 **Candidate path**:
-- Truncate `user_turn`/`assistant_turn` to `max_candidate_chars` (config) — enough
-  for `score_turn` and human review, not the full turn. Bounds raw text at rest.
-- `enqueue_candidate` with `content_hash = sha256(user_turn \x00 assistant_turn)`.
+- `content_hash = sha256(FULL user_turn \x00 FULL assistant_turn)`. **Hash the full
+  text; store the truncated text.** Hashing after truncation is a silent correctness
+  bug: two long turns sharing their first `max_candidate_chars` would collide and
+  `INSERT OR IGNORE` would drop the second. Hash and storage are separate concerns
+  (change #1).
+- Then truncate `user_turn`/`assistant_turn` to `max_candidate_chars` (config) for
+  storage — enough for review, not the full turn. Bounds raw text at rest.
+- `enqueue_candidate` with the full-text `content_hash` and the truncated columns.
+
+**Candidate lifecycle and dedup permanence** (change #1): candidate rows are
+**never hard-deleted**. Review sets `status` (`accepted`/`rejected`); the row stays
+(confirmed in current `cmd_review`). Combined with the `content_hash` UNIQUE index,
+this means a given turn-pair enqueues **at most once, ever** — rejected content is
+never re-suggested, promoted content is never re-enqueued. This is a deliberate
+invariant the dedup relies on: nothing may hard-delete candidate rows without
+providing another permanent record of their hashes.
 
 ### Correctness vs efficiency (idempotency)
 
@@ -138,6 +151,17 @@ FACTS §4 leaves `community`/unverified. Empirical confirmation of resume/fork
 `session_id` behavior is still worth doing during implementation, but the design no
 longer *depends* on it.
 
+**Path normalization is mandatory** (change #4): a `TEXT PRIMARY KEY` is
+case-sensitive, but Windows paths are not, and this machine also has 8.3 short paths
+live — so `C:\Users\...`, `c:\users\...`, and `C:\Users\FREDER~1.MAN\...` are three
+spellings of one file that would otherwise create three `transcript_progress` rows
+with three independent marks (the 2nd and 3rd re-scoring everything). Every
+`transcript_path` is normalized before use and stored normalized:
+`os.path.normcase(os.path.realpath(path))` — `realpath` resolves 8.3 short paths and
+symlinks to the canonical long form, `normcase` casefolds on Windows (no-op on
+POSIX). The disabled-marker hash (kill switch) uses the same normalized form. A
+fixture with three spellings of one path asserts a single `transcript_progress` row.
+
 ### promptId as a single point of failure (change #1)
 
 The HWM position uses `prompt_id` (`promptId` on user records, FACTS §4 `community`
@@ -154,15 +178,37 @@ on a drifting schema). Mitigations, layered so drift degrades rather than stops:
   capture is running on ordinal fallback"). A fixture with `promptId` absent
   asserts this loud path (not a silent zero).
 
+### SessionStart ordering (change #3)
+
+The sweep runs **before** the injection block is built and printed — not after.
+Reason: a refusal from a crashed session is only *discovered* by the sweep, so if
+injection prints first, that refusal cannot surface until the session after next —
+exactly the case (secret typed into `!mem:`, session died) where the user most needs
+prompt feedback. Order:
+
+1. Bounded recovery sweep (below). This may write candidates, sigil memories, and
+   `sigil_refusals` rows.
+2. Build the injection block against the now-updated store, including a refusal
+   notice if the sweep recorded any.
+3. Print once.
+
+This puts the sweep on the critical path before injection. That is deliberate: a
+slower-but-correct SessionStart beats fast-but-wrong feedback. The sweep stays
+bounded (below) so SessionStart stays within its 10s timeout.
+
 ### Crash recovery (SessionStart, bounded — change #2)
 
-Recovery rides the existing SessionStart spawn (no new process). After emitting the
-injection block:
+Recovery rides the existing SessionStart spawn (no new process):
 
 1. Resolve the project transcript dir (`~/.claude/projects/<munged-cwd>/`).
-2. Candidate files = transcripts whose mtime is newer than their
-   `transcript_progress.updated_at` (dirty check; stat-only, no read, for
-   already-current files), most-recent first.
+2. Candidate files = transcripts that are all of:
+   - mtime newer than their `transcript_progress.updated_at` (dirty check;
+     stat-only, no read, for already-current files);
+   - mtime **after `initialized_at`** — the timestamp ccmem first ran `migrate`,
+     stored in `schema_meta`. Transcripts predating ccmem's install are never swept
+     (change #2). Recorded at first migrate.
+   - **not marked disabled** (kill-switch exclusion, below).
+   Ordered most-recent first.
 3. Sweep with **two budgets**, not a file count:
    - `recovery_max_bytes` — cumulative bytes read across the sweep.
    - `recovery_max_ms` — wall-clock deadline; the sweep stops mid-file-list when
@@ -176,6 +222,25 @@ its budget with a deliberately oversized transcript fixture present (change #2).
 Residual gap (accepted, documented): a crashed transcript never touched again, or
 consistently beyond the byte/time budget, is not recovered. Candidates are
 low-stakes pending-review items.
+
+### The kill switch must not be defeated by the sweep (change #2)
+
+`CCMEM_DISABLED` means "ccmem does nothing" — including *retroactively*. Without
+this, a session run with the kill switch on still writes a transcript, and the next
+session's sweep captures from it: "does nothing" silently becomes "does it later,"
+which is worse than no kill switch because the user believed it. The kill switch is
+what the user reaches for precisely when doing something they don't want captured.
+
+Mechanism (marker file, not a sweep-time flag check): `CCMEM_DISABLED` is a
+launch-time env var, so a session is disabled for its whole lifetime and SessionStart
+reliably sees it. When `mem_inject.py` runs with `CCMEM_DISABLED` set, before
+short-circuiting it writes an empty marker at
+`CCMEM_HOME/disabled/<sha256(normalized-transcript-path)>`. This is a tombstone, not
+capture — no DB mutation, no scoring — and it is the one action a disabled session
+takes, so the guarantee ("this transcript is never swept") holds. The sweep skips any
+transcript whose normalized path has a marker.
+
+A fixture asserts a transcript from a disabled session is never swept.
 
 ### Sigil refusal home (change — user decision)
 
@@ -230,8 +295,9 @@ design keeps setting it (PreCompact marks the rows it captured) and documents it
     were never recovered" — doctor can report it. Latency trigger unchanged.
   - Add `recovery_budget` (`max_bytes`, `max_ms`) and `max_candidate_chars`.
 - `gates/gate_cache_safety.py`: remove `check_per_turn_default_off` and the UPS
-  byte-stability checks (the feature they guard is gone). SessionStart byte-stability
-  checks stay.
+  byte-stability checks (feature gone). Update the SessionStart cross-session
+  determinism check per change #5 (steady-state determinism + at-most-once
+  sweep-induced change) — **in its own commit with the reasoning**, not silently.
 - `gates/gate_hook_contract.py`: remove the "UserPromptSubmit never exits 2" case;
   contract now covers the three surviving hooks.
 - `gates/gate_secret_hygiene.py`: also scan `candidates`.
@@ -257,6 +323,43 @@ Note: measured latency impact is within run-to-run variance. This is
 policy-revert insurance on a managed machine, not a performance signal.
 ```
 
+### Cache determinism vs the sweep (change #5)
+
+The sweep now writes to `memories` (sigil path) and `candidates` inside SessionStart.
+The cross-session determinism gate asserts SessionStart output is byte-stable across
+two runs against an unchanged store — but run 1's sweep changes the store, so run 2
+legitimately differs. The gate is not deleted; it is updated deliberately, **in its
+own commit with the reasoning**, to assert two things instead of one:
+- **Steady state:** with no dirty transcripts present, two SessionStart runs are
+  byte-identical (the injection block is stable when there is nothing to sweep).
+- **At-most-once change:** a dirty transcript induces a sweep-driven change on the
+  first run only; a second run with no new dirt is byte-identical to the first's
+  post-sweep output.
+
+Real-world consequence, written down rather than discovered: **the first session
+after a crash burns one cache write** (the sweep mutates the store before injection,
+so that session's prompt prefix differs from the prior warm one). This is acceptable
+and rare — crashes are rare, and R4 already spends one cache write per session at
+SessionStart — but it is a real cost of sweep-before-inject (change #3) and is
+recorded here.
+
+### Concurrency (change #6)
+
+Two Claude Code sessions in the same project both fire SessionStart and both sweep.
+WAL handles concurrent writers and `content_hash` dedups any overlap, but two things
+must be explicit:
+- **Partial final line.** A sweep may read a transcript that is being appended to
+  right now, so the last JSONL line can be a truncated/partial JSON write. Parsing
+  must **skip a malformed line and continue the file**, never abort the file on it.
+  (A mid-file malformed line is different — that suggests real corruption — but the
+  robust choice is skip-and-continue for all parse failures, matching the existing
+  drift-tolerant-parser posture in FACTS §4.) A fixture with a truncated final line
+  asserts the rest of the file is still captured.
+- **Locked DB is now routine, not a rare R1 edge.** Concurrent sweeps will hit
+  `database is locked`. Capture uses a short busy-timeout/retry and, on continued
+  failure, exits 0 having done nothing (R1) — the HWM/`content_hash` make the next
+  session's sweep pick up whatever this one dropped. No data loss, just deferral.
+
 ## Testing (fixture-driven, before implementation)
 
 Fixtures live in `fixtures/` (already present; add synthetic transcript JSONL).
@@ -266,10 +369,27 @@ Fixtures live in `fixtures/` (already present; add synthetic transcript JSONL).
 - Idempotency: run twice → second run enqueues 0; HWM at last `prompt_id`.
 - Cross-event idempotency: PreCompact then SessionEnd on the same transcript → no
   duplicate candidates (asserts `content_hash` path).
+- **Hash on full text (change #1):** two turn-pairs with identical first
+  `max_candidate_chars` and divergent tails → **both** enqueue (guards the
+  truncate-then-hash bug).
+- **Rejected content does not re-enqueue (change #1):** reject a candidate, re-run
+  capture over the same transcript → no new row (row-retention + hash permanence).
 - Resume + fork (change #3): same-file resume continues the mark; forked file with
   copied pre-fork turns produces **no duplicates** (content_hash).
-- promptId absent (change #1): capture continues on ordinal fallback **and** emits
-  WARN; doctor reports hard failure.
+- **Path normalization (change #4):** three spellings of one transcript path
+  (`C:\`, `c:\`, 8.3 short) → a single `transcript_progress` row.
+- promptId totally absent (change #1): capture continues on ordinal fallback **and**
+  emits WARN; doctor reports hard failure.
+- **promptId mixed (change #7):** a transcript where some user records carry
+  `promptId` and some don't → positioning switches between prompt_id and ordinal
+  with **no skipped and no re-processed** turns across a PreCompact→SessionEnd
+  sequence.
+- **Kill switch (change #2):** a transcript from a `CCMEM_DISABLED` session (marker
+  present) is **never swept**.
+- **Pre-install bound (change #2):** a transcript with mtime before `initialized_at`
+  is never swept.
+- **Partial final line (change #6):** a transcript whose last line is truncated JSON
+  → the malformed line is skipped and every complete prior turn is captured.
 - Sigil durable write (assert exactly): `!mem:` record → one `memories` row,
   `type='preference'`, `status='active'`, redacted content, `maybe_supersede`
   applied; **not** a candidate.
@@ -296,7 +416,9 @@ Fixtures live in `fixtures/` (already present; add synthetic transcript JSONL).
 - Modify: `ccmem/capture.py` — `capture_transcript`, sigil routing, `content_hash`,
   text cap, promptId-drift WARN, ordinal fallback.
 - Modify: `ccmem/db.py` — add `transcript_progress`, `sigil_refusals`; add
-  `content_hash` (+ UNIQUE) to `candidates`; bump `schema_version` 1→2; migrate.
+  `content_hash` (+ UNIQUE) to `candidates`; record `initialized_at` in `schema_meta`
+  at first migrate (change #2 sweep lower-bound); bump `schema_version` 1→2; migrate.
+  Add a short SQLite busy-timeout on connect (change #6, locked-DB routine).
 - Modify: `hooks/mem_inject.py` — bounded recovery sweep + surface refusals after
   injection.
 - Modify: `hooks/mem_snapshot.py` — capture then mark `is_pre_compact`.
@@ -309,8 +431,9 @@ Fixtures live in `fixtures/` (already present; add synthetic transcript JSONL).
   `gates/gate_secret_hygiene.py`, `gates/config.json`.
 - Add: gate for SessionStart recovery budget (oversized fixture).
 - Delete: `tests/test_hook_mem_retrieve.py`. Modify: `tests/test_hook_safety.py`.
-- Add: `fixtures/` synthetic transcript JSONL (salient, sigil, sigil+secret,
-  resume, fork, promptId-absent, oversized).
+- Add: `fixtures/` synthetic transcript JSONL (salient/non-salient, sigil,
+  sigil+secret, resume, fork, promptId-absent, promptId-mixed, oversized,
+  truncated-final-line, identical-prefix-divergent-tail).
 - Modify: `docs/DESIGN.md`.
 
 (Note: `plugin/hooks.json` does not exist yet — the `plugin/` layout in CLAUDE.md
