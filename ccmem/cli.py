@@ -284,13 +284,13 @@ def _check_defender_exclusions(home: str, spawn_floor_ms: float | None = None) -
     3. If not readable (access denied): fall back to timing evidence — if the
        spawn floor is >50% above the confirmed floor, the exclusion may have reverted.
     """
-    hooks_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks"
-    )
     py_exe = sys.executable
     lib_dir = os.path.join(os.path.dirname(py_exe), "Lib")
 
-    intended = {hooks_dir.lower(): hooks_dir, lib_dir.lower(): lib_dir}
+    # Only track the Lib exclusion. hooks-dir exclusion was explicitly decided against:
+    # the hooks directory contains live, frequently-edited code on a corporate-synced
+    # path — a permanent AV exception there is not worth ~231ms. See FACTS.md §11.
+    intended = {lib_dir.lower(): lib_dir}
 
     current = _read_defender_exclusion_paths()
     saved_state = _load_defender_state(home)
@@ -305,8 +305,7 @@ def _check_defender_exclusions(home: str, spawn_floor_ms: float | None = None) -
         all_ok = all(present.values())
         for raw_key, path in intended.items():
             status = "OK" if present[raw_key] else "MISSING"
-            label = "hooks dir" if "hooks" in raw_key else "Python Lib"
-            print(f"  Defender exclusion — {label} [{status}]: {path}")
+            print(f"  Defender exclusion — Python Lib [{status}]: {path}")
 
         # Flag reverts against previously confirmed state
         if saved_state.get("confirmed_paths"):
@@ -342,21 +341,19 @@ def _check_defender_exclusions(home: str, spawn_floor_ms: float | None = None) -
             at = saved_state.get("confirmed_at", "unknown time")[:19]
             print(f"  Last confirmed: {at} — run doctor with admin rights to re-verify registry state.")
         else:
-            print("  No confirmed baseline yet. Apply exclusions, then run doctor to save baseline.")
+            print("  No confirmed baseline yet. Run doctor with admin rights after applying Lib exclusion to save baseline.")
 
-    # Show apply instructions if any are missing or unreadable
-    missing_cmds = []
-    if current is None:
-        missing_cmds = list(intended.values())
-    else:
+    # Show apply instructions only when the registry confirms the exclusion is missing.
+    # When the registry is unreadable, we cannot determine whether the exclusion is
+    # applied — the timing-based revert detection above handles that case instead.
+    if current is not None:
         missing_cmds = [v for k, v in intended.items() if not _is_excluded(v, current)]
-
-    if missing_cmds:
-        print("  WARN: Defender file-path exclusions reduce hook spawn cost ~37%.")
-        print("  WARN: Apply with admin PowerShell:")
-        for path in missing_cmds:
-            print(f'  WARN:   Add-MpPreference -ExclusionPath "{path}"')
-        print("  WARN: These are read-only paths with no user-writable code.")
+        if missing_cmds:
+            print("  WARN: Python Lib Defender path exclusion is missing — hook spawn cost ~37% higher.")
+            print("  WARN: Apply with admin PowerShell:")
+            for path in missing_cmds:
+                print(f'  WARN:   Add-MpPreference -ExclusionPath "{path}"')
+            print("  WARN: Python Lib is a read-only stdlib directory with no user-writable code.")
 
 
 def cmd_doctor(args):
