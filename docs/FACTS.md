@@ -452,15 +452,41 @@ climbs materially above 3056ms.
 - Gate (list, no shell): p50=1645ms, p90=1917ms
 - Production (shell=True, short path): p50=3056ms, p90=4085ms
 
-This is the reference point for all future latency comparisons. A post-change
-measurement more than 20% above these figures warrants investigation.
+This baseline was valid only while the Lib exclusion was live. It was reverted within
+~24h — see the next finding. Treat these numbers as transient, not the sustained state.
 
-**Setup recommendation:** add two Defender path exclusions:
-1. The hooks directory: `C:\...\ccmem\hooks` (or wherever hooks live after install)
-2. The Python Lib directory: `C:\...\pythoncore-3.14-64\Lib`
+### Defender exclusion is NOT durable on this machine — reverted by Intune (2026-09-24)
 
-These are stable, readable-only paths with no user-written code. The exclusions can be
-added by a `doctor --fix` command or a one-time setup script (both require admin).
+**The Lib exclusion applied 2026-09-23 was gone by the next morning.** Confirmed by
+dumping `(Get-MpPreference).ExclusionPath`: the `pythoncore-3.14-64\Lib` path is absent
+from both the elevated (~270-entry, policy-merged) view and the non-admin (1-entry local)
+view. Every entry in the machine's exclusion list is corporate/IT tooling (Nexthink,
+Tanium, Mandiant, Forcepoint, dgagent, Genetec, AttackIQ, Citrix) — none user-added.
+
+Root cause: `HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Exclusions` exists →
+Intune/Group Policy actively manages Defender exclusions on this machine and wipes
+user `Add-MpPreference` additions at each policy refresh (~8h cycle). `DisableLocalAdminMerge`
+is not set, so the exclusion was *reverted*, not *ignored* — it worked for a few hours,
+then the refresh removed it.
+
+**Consequences:**
+- User-applied Defender exclusions are not a viable permanent fix on this machine.
+  Re-applying is whack-a-mole against the policy refresh.
+- The sustained (no-exclusion) state is the real baseline: floor ~1707ms active sync,
+  production ~5154ms. The 1243ms/3056ms figures are achievable only transiently.
+- The `doctor` revert-detection (defender_state.json + timing comparison) caught this
+  on day one — working as designed. But there is no durable "good" baseline to save,
+  so `--save-baseline` should not be run here.
+- The account is non-admin; UAC elevation switches to a separate admin account, so
+  even the registry-read path in doctor cannot run as the user. Confirmed 2026-09-24.
+
+**Fix direction:** the durable levers no longer include Defender exclusions. Remaining:
+- **Option B (fire Stop capture less often):** move per-turn capture off the Stop hook
+  (PreCompact + SessionEnd only). Removes the per-turn spawn cost entirely; no dependency
+  on Defender or IT policy. Cheapest durable fix. See DESIGN.md.
+- **Option C (pre-warmed daemon):** most complex; gated on measured drop rate.
+- **Request IT to add the exclusion to the Intune policy:** slow, uncertain, not worth
+  it for a personal dev tool.
 
 ### Findings on other hypotheses
 
@@ -506,7 +532,7 @@ only 315ms to the Stop timeout (5000ms).
 |---|---|---|
 | Windows Store stub (`python` on PATH) | 2–5× overhead | **Fixed** — settings.json uses real Python path |
 | `cmd.exe` shell (spaces in path) | ~1.8× overhead on top of real Python | Remaining — affects production only |
-| Defender file-path scanning (Lib) | ~2098ms production (41%) during active sync | **Partially fixed** — Lib exclusion applied; hooks-dir exclusion pending |
+| Defender file-path scanning (Lib) | ~2098ms production (41%) during active sync | **Not durably fixable** — Lib exclusion reverts within ~24h (Intune-managed, see 2026-09-24 finding) |
 | OneDrive sync filter driver / system I/O | ~600ms elevation (534ms→1132ms with exclusions) | Irreducible without eliminating spawns |
 | Defender process exclusion | ~9% | Negligible — wrong exclusion type |
 | Python site imports (`pywin32_bootstrap`) | ~20ms | Noise |
@@ -515,11 +541,14 @@ only 315ms to the Stop timeout (5000ms).
 
 ### Phase 4 analysis
 
-**Current state (post Store-stub fix, Lib exclusion applied):** Production Stop hook
-p50=3056ms, p90=4085ms against 10s timeout — comfortable. Stop timeout raised to 10s
-(from 5s). Apply hooks-dir exclusion → estimated ~2825ms. Apply both exclusions +
-move hooks outside OneDrive → estimated ~2310ms. Daemon threshold (spawn_daemon_ms=3500)
-is not tripped at current floor p50=1243ms; latency trigger will not fire.
+**Current state (post Store-stub fix, no durable exclusion):** Defender exclusions revert
+within ~24h on this Intune-managed machine (see 2026-09-24 finding), so the sustained state
+is no-exclusion: production Stop hook ~5154ms p50, floor ~1707ms. The 10s Stop timeout
+(raised from 5s) prevents data loss, but every turn still pays a multi-second pause.
+Since the Defender lever is not durable, the remaining durable fix is architectural:
+Option B (fire Stop capture less often — PreCompact/SessionEnd only) is the cheapest and
+removes the per-turn spawn cost without depending on IT policy. Option C (daemon) if
+Option B proves insufficient.
 
 ### Paused-OneDrive measurement (2026-09-23)
 
