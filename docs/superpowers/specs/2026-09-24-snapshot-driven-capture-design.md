@@ -97,6 +97,13 @@ Per turn-pair reconstructed from the transcript (one `user` record + the followi
 `assistant` `text` blocks concatenated across `apiBlockIndex`, up to the next
 `user` record):
 
+0. **Per-turn install bound (finding #4).** Skip any pair whose user record
+   `timestamp` predates `schema_meta.initialized_at`. This is the real privacy
+   guarantee: a pre-install session that is *resumed* has a current file mtime (so it
+   passes the cheap stat prefilter) but still contains turns from before ccmem was
+   installed. The file-mtime check is only a prefilter to avoid reads; the per-turn
+   timestamp check is the guarantee. Pairs without a parseable timestamp are treated
+   as post-install (captured) — drift-tolerant, and the common case for live turns.
 1. If the user text is a `!mem:` sigil (via `extract_sigil`): route to the
    **sigil path** (durable memory), not to candidates.
 2. Otherwise: `score_turn`; if `>= threshold`, route to the **candidate path**.
@@ -200,13 +207,19 @@ bounded (below) so SessionStart stays within its 10s timeout.
 
 Recovery rides the existing SessionStart spawn (no new process):
 
-1. Resolve the project transcript dir (`~/.claude/projects/<munged-cwd>/`).
+1. Resolve the project transcript dir as `os.path.dirname(transcript_path)` from the
+   SessionStart payload (finding #9). No cwd-munging is needed on the hook path —
+   Claude Code already hands us the transcript's directory. (Only `doctor`, which has
+   no payload, needs a cwd→dir munger; that single munger lives in `ccmem/paths.py`
+   and has exactly one caller. No two mungers to drift apart.)
 2. Candidate files = transcripts that are all of:
    - mtime newer than their `transcript_progress.updated_at` (dirty check;
      stat-only, no read, for already-current files);
-   - mtime **after `initialized_at`** — the timestamp ccmem first ran `migrate`,
-     stored in `schema_meta`. Transcripts predating ccmem's install are never swept
-     (change #2). Recorded at first migrate.
+   - mtime **after `initialized_at`** — **a cheap stat-only prefilter, not the
+     guarantee** (finding #4). The real pre-install bound is per-turn (skip pairs whose
+     record `timestamp` predates `initialized_at`, in `capture_transcript`) — because a
+     resumed pre-install session has a current mtime yet contains pre-install turns.
+     The mtime prefilter only avoids reads; it never decides what is captured.
    - **not marked disabled** (kill-switch exclusion, below).
    Ordered most-recent first.
 3. Sweep with **two budgets**, not a file count:
@@ -231,27 +244,61 @@ session's sweep captures from it: "does nothing" silently becomes "does it later
 which is worse than no kill switch because the user believed it. The kill switch is
 what the user reaches for precisely when doing something they don't want captured.
 
-Mechanism (marker file, not a sweep-time flag check): `CCMEM_DISABLED` is a
-launch-time env var, so a session is disabled for its whole lifetime and SessionStart
-reliably sees it. When `mem_inject.py` runs with `CCMEM_DISABLED` set, before
-short-circuiting it writes an empty marker at
-`CCMEM_HOME/disabled/<sha256(normalized-transcript-path)>`. This is a tombstone, not
-capture — no DB mutation, no scoring — and it is the one action a disabled session
-takes, so the guarantee ("this transcript is never swept") holds. The sweep skips any
-transcript whose normalized path has a marker.
+Mechanism (marker file keyed on **session_id**, not path — finding #1). `CCMEM_DISABLED`
+is a launch-time env var, so a session is disabled for its whole lifetime and
+SessionStart reliably sees it. When `mem_inject.py` runs with `CCMEM_DISABLED` set,
+before short-circuiting it writes an empty marker at
+`CCMEM_HOME/disabled/<sha256(session_id)>`. This is a tombstone, not capture — no DB
+mutation, no scoring — and it is the one action a disabled session takes.
 
-A fixture asserts a transcript from a disabled session is never swept.
+**Why session_id, not path** (finding #1): the marker is written at SessionStart, when
+the transcript file may not exist yet. A path normalizer that resolves 8.3 short names
+or symlinks (`realpath`) produces a *different* string for an absent vs. present file
+in the general case (verified: long-form paths happen to match, but 8.3 leaves,
+symlinks/junctions, and absent intermediate dirs do not) — so a path-keyed marker
+written at SessionStart could fail to match the sweep's later normalization, and the
+disabled session would be swept anyway. `session_id` sidesteps normalization entirely:
+the SessionStart payload carries it, and the sweep derives the identical value from the
+transcript filename stem (FACTS §4: `<munged>/<session-uuid>.jsonl`). The sweep skips
+any transcript whose filename-derived session_id has a marker.
+
+**Marker-write failure must be loud** (finding #2). R1 keeps the hook at exit 0, but a
+silently-unwritten marker (unwritable `CCMEM_HOME`, full disk) degrades the privacy
+guarantee without the user knowing. So if the marker write fails, the disabled
+SessionStart still exits 0 and does nothing else, but emits a `systemMessage`:
+"ccmem is disabled but could not record a do-not-capture marker for this session; it
+may be captured later." This is the one place ccmem is deliberately noisy.
+
+Fixtures: (a) a disabled session's transcript is never swept even when the marker was
+written before the file existed; (b) unwritable `CCMEM_HOME` + `CCMEM_DISABLED` → exit
+0, no marker, `systemMessage` emitted.
 
 ### Sigil refusal home (change — user decision)
 
 **Both**, because they are not alternatives — they compose:
-- The refusal is recorded in a `sigil_refusals` table. This persistence is what lets
-  the message survive to the next session at all.
-- SessionStart injection surfaces it: "N `!mem:` write(s) were refused last session
-  (contained secrets) — run `ccmem list --refused`." This is what meets the
-  requirement that a refusal reaches the user *without thinking to check* — it lands
-  in context unprompted.
-- Doctor reports the same table for free.
+- The refusal is recorded in a `sigil_refusals` table with an `acknowledged_at`
+  column (nullable). This persistence is what lets the message survive to the next
+  session at all.
+- SessionStart injection surfaces the count of **unacknowledged** refusals
+  (`acknowledged_at IS NULL`): "N unreviewed `!mem:` refusal(s) (contained secrets) —
+  run `ccmem list --refused`." This meets the requirement that a refusal reaches the
+  user *without thinking to check* — it lands in context unprompted.
+- Doctor reports the same unacknowledged count.
+
+**Lifecycle and determinism (finding #3).** The notice must be dismissible, and
+SessionStart must not mutate refusal state — otherwise run 1 and run 2 of SessionStart
+differ, violating the steady-state determinism the cache gate asserts. So:
+- SessionStart is a **pure read** of `sigil_refusals` — it never sets
+  `acknowledged_at`. Two SessionStart runs with the same unacknowledged set produce the
+  same notice (determinism holds).
+- Acknowledgement is an **explicit CLI action**: `ccmem list --refused` displays the
+  refusals and stamps `acknowledged_at`. The clear is under the user's control, not a
+  side effect of injection. After acknowledgement, subsequent SessionStarts stop
+  showing them. This is what prevents the notice from becoming permanent wallpaper.
+
+**Wording (finding #3):** not "last session." A single sweep can surface refusals from
+several prior sessions, and not necessarily the most recent — the notice says
+"N unreviewed `!mem:` refusal(s)", with no claim about which session.
 
 A synchronous per-turn warning is impossible without a per-turn hook; SessionStart
 delivery is the earliest guaranteed unprompted surface once UPS is gone.
@@ -415,10 +462,18 @@ Fixtures live in `fixtures/` (already present; add synthetic transcript JSONL).
 
 - Modify: `ccmem/capture.py` — `capture_transcript`, sigil routing, `content_hash`,
   text cap, promptId-drift WARN, ordinal fallback.
-- Modify: `ccmem/db.py` — add `transcript_progress`, `sigil_refusals`; add
-  `content_hash` (+ UNIQUE) to `candidates`; record `initialized_at` in `schema_meta`
-  at first migrate (change #2 sweep lower-bound); bump `schema_version` 1→2; migrate.
-  Add a short SQLite busy-timeout on connect (change #6, locked-DB routine).
+- Modify: `ccmem/db.py` — add `transcript_progress`; add `sigil_refusals` (with
+  `acknowledged_at`, finding #3); add `content_hash` (+ UNIQUE) to `candidates`; add
+  `content_hash` to `memories` (finding/Task 5 — sigil idempotency keys on it, **not**
+  on `subject`, which `maybe_supersede` deliberately uses to match *different* sigils);
+  record `initialized_at` in `schema_meta` at first migrate; bump `schema_version` 1→2;
+  migrate. Add a short SQLite busy-timeout on connect (change #6, locked-DB routine).
+- Modify: `ccmem/paths.py` — add `project_transcript_dir(cwd)` munger (finding #9),
+  used only by `doctor`; the hook path uses `dirname(transcript_path)`.
+- Modify: `ccmem/transcript.py` — `TurnPair` carries `timestamp` (finding #4 per-turn
+  bound) and `cwd`.
+- Modify: `ccmem/cli.py` — add `ccmem list --refused` (displays refusals, stamps
+  `acknowledged_at`); doctor reports unacknowledged refusal count.
 - Modify: `hooks/mem_inject.py` — bounded recovery sweep + surface refusals after
   injection.
 - Modify: `hooks/mem_snapshot.py` — capture then mark `is_pre_compact`.
