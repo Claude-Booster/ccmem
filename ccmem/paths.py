@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -66,6 +67,17 @@ def sync_root_for(path: str) -> str | None:
         if resolved == norm or resolved.startswith(norm + os.sep):
             return root
     return None
+
+
+def project_transcript_dir(cwd: str) -> str:
+    """cwd -> ~/.claude/projects/<munged>/ . Claude Code lowercases the Windows
+    drive letter and replaces ':', path separators, spaces, and '.' with '-'.
+    FACTS §4 marks this scheme community/unstable — the hook path avoids it entirely
+    by using dirname(transcript_path); doctor is the only caller."""
+    if len(cwd) >= 2 and cwd[1] == ":":
+        cwd = cwd[0].lower() + cwd[1:]
+    munged = re.sub(r"[:\\/ .]", "-", cwd)
+    return os.path.join(os.path.expanduser("~"), ".claude", "projects", munged)
 
 
 _LEGACY_HOME = os.path.join(os.path.expanduser("~"), ".claude", "ccmem")
