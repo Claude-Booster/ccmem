@@ -21,7 +21,7 @@ def main() -> None:
         return
     try:
         from ccmem.capture import capture_transcript
-        from ccmem.db import connect, log_hook_event
+        from ccmem.db import connect, log_hook_event, migrate
         from ccmem.paths import maybe_migrate, resolve_home
 
         home = resolve_home()
@@ -32,6 +32,7 @@ def main() -> None:
         transcript = payload.get("transcript_path", "")
         session_id = payload.get("session_id", "unknown")
         con = connect(db_path)
+        migrate(con)
         if transcript:
             capture_transcript(con, transcript, session_id, is_pre_compact=True)
         _dur = int((time.monotonic() - _t0) * 1000)  # ccmem: cache-safe

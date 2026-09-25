@@ -21,7 +21,7 @@ def main() -> None:
         return
     try:
         from ccmem.capture import capture_transcript
-        from ccmem.db import connect, log_hook_event
+        from ccmem.db import connect, log_hook_event, migrate
         from ccmem.paths import maybe_migrate, resolve_home
 
         home = resolve_home()
@@ -30,6 +30,7 @@ def main() -> None:
         if not os.path.exists(db_path):
             return
         con = connect(db_path)
+        migrate(con)
         transcript = payload.get("transcript_path", "")
         session_id = payload.get("session_id", "unknown")
         if transcript:
