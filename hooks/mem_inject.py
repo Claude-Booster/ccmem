@@ -55,7 +55,7 @@ def main() -> None:
         return
 
     try:
-        from ccmem.db import connect, log_hook_event
+        from ccmem.db import connect, log_hook_event, migrate
         from ccmem.paths import maybe_migrate, resolve_home
         from ccmem.recovery import recover_project
         from ccmem.render import render
@@ -74,6 +74,7 @@ def main() -> None:
         source = payload.get("source", "startup")
 
         con = connect(db_path)
+        migrate(con)
 
         # 1) recovery sweep BEFORE building injection so crash-session refusals
         #    surface now. project dir comes straight from the payload's

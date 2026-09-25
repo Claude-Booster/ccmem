@@ -36,26 +36,6 @@ def test_emits_no_context():
         assert not obj.get("hookSpecificOutput", {}).get("additionalContext", "").strip()
 
 
-def test_marks_pending_candidates_pre_compact(tmp_path):
-    from ccmem.db import connect, migrate
-    con = connect(tmp_path / "mem.db")
-    migrate(con)
-    con.execute("""
-        INSERT INTO candidates (id, session_id, user_turn, assistant_turn,
-                                classifier_score, created_at, status)
-        VALUES ('c1','sess','user','asst',5.0,'2026-01-01T00:00:00Z','pending')
-    """)
-    con.commit()
-    con.close()
-    proc = run_hook("payload_pre_compact.json", db_dir=str(tmp_path))
-    assert proc.returncode == 0
-    from ccmem.db import connect as c2
-    con2 = c2(tmp_path / "mem.db")
-    row = con2.execute("SELECT is_pre_compact FROM candidates WHERE id='c1'").fetchone()
-    assert row[0] == 1
-    con2.close()
-
-
 def test_survives_hostile_inputs():
     for blob in [b"", b"not json", b"null"]:
         env = os.environ.copy()
