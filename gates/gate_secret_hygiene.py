@@ -106,7 +106,7 @@ def check_gitignore(r: GateResult) -> None:
     if not path.exists():
         r.fail(".gitignore exists", "no .gitignore -- the DB will get committed")
         return
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     missing = [p for p in GITIGNORE_REQUIRED if p not in text]
     if missing:
         r.fail(".gitignore covers memory store", f"missing: {', '.join(missing)}")

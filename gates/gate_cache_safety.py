@@ -92,7 +92,7 @@ def check_tool_hooks(r: GateResult) -> None:
             continue
         checked.append(rel)
         try:
-            conf = json.loads(path.read_text())
+            conf = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             r.fail(f"{rel}: parses", str(exc))
             continue
