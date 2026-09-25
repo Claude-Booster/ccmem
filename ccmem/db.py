@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS memories (
     access_count INTEGER DEFAULT 0,
     status       TEXT NOT NULL DEFAULT 'active',
     supersedes   TEXT REFERENCES memories(id),
-    embedding    BLOB
+    embedding    BLOB,
+    content_hash TEXT
 );
 
 CREATE TABLE IF NOT EXISTS candidates (
@@ -32,7 +33,8 @@ CREATE TABLE IF NOT EXISTS candidates (
     classifier_score REAL NOT NULL,
     is_pre_compact   INTEGER DEFAULT 0,
     created_at       TEXT NOT NULL,
-    status           TEXT NOT NULL DEFAULT 'pending'
+    status           TEXT NOT NULL DEFAULT 'pending',
+    content_hash     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS session_injections (
@@ -60,8 +62,26 @@ CREATE TABLE IF NOT EXISTS hook_log (
     duration_ms INTEGER
 );
 
-INSERT OR IGNORE INTO schema_meta VALUES ('schema_version', '1');
+CREATE TABLE IF NOT EXISTS transcript_progress (
+    transcript_path TEXT PRIMARY KEY,
+    last_prompt_id  TEXT,
+    last_ordinal    INTEGER NOT NULL DEFAULT -1,
+    session_id      TEXT,
+    updated_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sigil_refusals (
+    id              TEXT PRIMARY KEY,
+    transcript_path TEXT,
+    session_id      TEXT,
+    created_at      TEXT NOT NULL,
+    excerpt         TEXT NOT NULL,
+    acknowledged_at TEXT
+);
+
+INSERT OR IGNORE INTO schema_meta VALUES ('schema_version', '2');
 INSERT OR IGNORE INTO schema_meta VALUES ('embedding_dim', '384');
+INSERT OR IGNORE INTO schema_meta VALUES ('initialized_at', strftime('%Y-%m-%dT%H:%M:%SZ','now'));
 """
 
 
@@ -69,17 +89,36 @@ def connect(path: str | Path) -> sqlite3.Connection:
     con = sqlite3.connect(str(path))
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA foreign_keys=ON")
+    con.execute("PRAGMA busy_timeout=3000")
     return con
 
 
 def migrate(con: sqlite3.Connection) -> None:
     con.executescript(_DDL)
-    # Idempotent column additions for DBs created before schema_version 2.
+    # Idempotent column additions for DBs created before hook_log schema change.
     try:
         con.execute("ALTER TABLE hook_log ADD COLUMN duration_ms INTEGER")
         con.commit()
     except Exception:
         pass  # column already exists
+    # Idempotent column additions for DBs created before schema_version 2.
+    for tbl in ("candidates", "memories"):
+        try:
+            con.execute(f"ALTER TABLE {tbl} ADD COLUMN content_hash TEXT")
+            con.commit()
+        except Exception:
+            pass  # column already exists
+    # Unique indexes on content_hash — created after ALTER TABLE loop so the
+    # column is guaranteed to exist on both fresh and pre-v2 DBs.
+    con.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_candidates_content_hash"
+        " ON candidates(content_hash)"
+    )
+    con.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_content_hash"
+        " ON memories(content_hash)"
+    )
+    con.commit()
 
 
 def log_hook_event(

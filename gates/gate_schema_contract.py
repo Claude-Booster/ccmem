@@ -27,19 +27,25 @@ EXPECTED_TABLES: dict[str, list[str]] = {
         "id", "type", "content", "context", "subject",
         "scope", "project_id", "project_root",
         "created_at", "accessed_at", "access_count",
-        "status", "supersedes", "embedding",
+        "status", "supersedes", "embedding", "content_hash",
     ],
     "candidates": [
         "id", "session_id", "prompt_id",
         "user_turn", "assistant_turn",
         "classifier_score", "is_pre_compact",
-        "created_at", "status",
+        "created_at", "status", "content_hash",
     ],
     "session_injections": [
         "session_id", "memory_id", "injected_at",
     ],
     "schema_meta": [
         "key", "value",
+    ],
+    "transcript_progress": [
+        "transcript_path", "last_prompt_id", "last_ordinal", "session_id", "updated_at",
+    ],
+    "sigil_refusals": [
+        "id", "transcript_path", "session_id", "created_at", "excerpt", "acknowledged_at",
     ],
 }
 
@@ -65,7 +71,7 @@ GATE_COLUMN_REFERENCES: dict[str, list[str]] = {
         "id", "session_id", "prompt_id",
         "user_turn", "assistant_turn",
         "classifier_score", "is_pre_compact",
-        "created_at", "status",
+        "created_at", "status", "content_hash",
     ],
     "session_injections": [
         "session_id", "memory_id", "injected_at",
