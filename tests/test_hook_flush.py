@@ -19,3 +19,23 @@ def test_sessionend_captures_and_dedups_after_precompact(tmp_path):
     con = connect(os.path.join(home, "mem.db"))
     # cross-event idempotency: no duplicate from the second capture
     assert con.execute("SELECT COUNT(*) FROM candidates").fetchone()[0] == 1
+
+
+def test_sessionend_alone_captures(tmp_path):
+    """SessionEnd captures on a fresh DB even without a prior PreCompact."""
+    home = str(tmp_path)
+    from ccmem.db import connect, migrate
+    migrate(connect(os.path.join(home, "mem.db")))
+    env = {**os.environ, "CCMEM_HOME": home, "PYTHONPATH": REPO}
+    se = subprocess.run(
+        [sys.executable, os.path.join(REPO, "hooks", "mem_flush.py")],
+        input=json.dumps({
+            "hook_event_name": "SessionEnd",
+            "transcript_path": os.path.join(FIX, "basic.jsonl"),
+            "session_id": "s2",
+        }).encode(),
+        capture_output=True, env=env, timeout=30,
+    )
+    assert se.returncode == 0
+    con = connect(os.path.join(home, "mem.db"))
+    assert con.execute("SELECT COUNT(*) FROM candidates").fetchone()[0] > 0
