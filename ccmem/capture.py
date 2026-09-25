@@ -1,8 +1,12 @@
 from __future__ import annotations
+import hashlib
+import os
 import re
 import sqlite3
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from ccmem.transcript import iter_turn_pairs, normalize_transcript_path
 
 _PATTERNS: list[tuple[float, re.Pattern]] = [
     (3, re.compile(r"\b(we decided|we'?re going with|the approach is|going with)\b", re.I)),
@@ -14,6 +18,24 @@ _PATTERNS: list[tuple[float, re.Pattern]] = [
 ]
 
 _SIGIL_RE = re.compile(r"^!mem(?:\[(?P<scope>[a-z]+)\])?:\s*(?P<text>.+)", re.DOTALL)
+
+MAX_CANDIDATE_CHARS = int(os.environ.get("CCMEM_MAX_CANDIDATE_CHARS", "2000"))
+
+
+def content_hash(user_turn: str, assistant_turn: str) -> str:
+    h = hashlib.sha256()
+    h.update(user_turn.encode("utf-8", "replace"))
+    h.update(b"\x00")
+    h.update(assistant_turn.encode("utf-8", "replace"))
+    return h.hexdigest()
+
+
+@dataclass
+class CaptureResult:
+    candidates: int = 0
+    sigil_memories: int = 0
+    refusals: int = 0
+    promptid_drift: bool = False
 
 
 def score_turn(user_text: str, assistant_text: str) -> float:
@@ -44,22 +66,96 @@ def enqueue_candidate(
     assistant_turn: str,
     score: float,
     is_pre_compact: bool = False,
-) -> None:
+):
+    h = content_hash(user_turn, assistant_turn)          # FULL text
+    before = con.total_changes
     con.execute(
         "INSERT OR IGNORE INTO candidates "
         "(id, session_id, prompt_id, user_turn, assistant_turn, "
-        "classifier_score, is_pre_compact, created_at, status) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
+        "classifier_score, is_pre_compact, created_at, status, content_hash) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
         (
             str(uuid.uuid4()),   # ccmem: cache-safe — id is stored, not injected
             session_id,
             prompt_id,
-            user_turn,
-            assistant_turn,
+            user_turn[:MAX_CANDIDATE_CHARS], assistant_turn[:MAX_CANDIDATE_CHARS],
             score,
             1 if is_pre_compact else 0,
             datetime.now(timezone.utc).isoformat(),  # ccmem: cache-safe
-            "pending",
+            "pending", h,
         ),
     )
     con.commit()
+    return con.total_changes - before   # >0 inserted, 0 deduped
+
+
+def _read_hwm(con, norm_path):
+    row = con.execute(
+        "SELECT last_prompt_id, last_ordinal FROM transcript_progress WHERE transcript_path=?",
+        (norm_path,),
+    ).fetchone()
+    return (row[0], row[1]) if row else (None, -1)
+
+
+def _write_hwm(con, norm_path, session_id, last_prompt_id, last_ordinal):
+    con.execute(
+        "INSERT INTO transcript_progress "
+        "(transcript_path, last_prompt_id, last_ordinal, session_id, updated_at) "
+        "VALUES (?,?,?,?,?) "
+        "ON CONFLICT(transcript_path) DO UPDATE SET "
+        "last_prompt_id=excluded.last_prompt_id, last_ordinal=excluded.last_ordinal, "
+        "session_id=excluded.session_id, updated_at=excluded.updated_at",
+        (norm_path, last_prompt_id, last_ordinal, session_id,
+         datetime.now(timezone.utc).isoformat()),
+    )
+    con.commit()
+
+
+def _initialized_at(con) -> str:
+    row = con.execute(
+        "SELECT value FROM schema_meta WHERE key='initialized_at'"
+    ).fetchone()
+    return row[0] if row else "1970-01-01T00:00:00Z"
+
+
+def capture_transcript(con, transcript_path, session_id, is_pre_compact=False):
+    norm = normalize_transcript_path(transcript_path)
+    last_pid, last_ord = _read_hwm(con, norm)
+    init_at = _initialized_at(con)
+    result = CaptureResult()
+    threshold = float(os.environ.get("CCMEM_THRESHOLD", "4"))
+    seen_pid = seen_user = 0
+    max_pid, max_ord = last_pid, last_ord
+    for pair in iter_turn_pairs(transcript_path):
+        seen_user += 1
+        if pair.prompt_id is not None:
+            seen_pid += 1
+        # Position by ordinal: it is always present and stable for an append-only
+        # transcript (the Nth user record is always the Nth). prompt_id is stored as
+        # the HWM pointer and used only for drift detection — this is why mixed
+        # promptId presence (change #7) cannot cause a skip or re-process.
+        if pair.ordinal <= last_ord:
+            continue
+        # Per-turn install bound (finding #4): skip turns from before ccmem existed,
+        # even in a resumed pre-install session whose file mtime is now current.
+        # A missing/unparseable timestamp is treated as post-install (captured).
+        if pair.timestamp is not None and pair.timestamp < init_at:
+            max_ord = max(max_ord, pair.ordinal)   # advance HWM past it; never capture
+            if pair.prompt_id is not None:
+                max_pid = pair.prompt_id
+            continue
+        # (Task 5 inserts sigil handling here, before the candidate path.)
+        score = score_turn(pair.user_turn, pair.assistant_turn)
+        if score >= threshold:
+            if enqueue_candidate(con, session_id, pair.prompt_id,
+                                 pair.user_turn, pair.assistant_turn, score,
+                                 is_pre_compact):
+                result.candidates += 1
+        max_ord = max(max_ord, pair.ordinal)
+        if pair.prompt_id is not None:
+            max_pid = pair.prompt_id
+    if seen_user > 0 and seen_pid == 0:
+        result.promptid_drift = True
+    if max_ord != last_ord or max_pid != last_pid:
+        _write_hwm(con, norm, session_id, max_pid, max_ord)
+    return result
