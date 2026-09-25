@@ -48,6 +48,21 @@ def cmd_add(args):
 
 
 def cmd_list(args):
+    if getattr(args, "refused", False):
+        con = _db(args)
+        rows = con.execute(
+            "SELECT id, created_at, excerpt FROM sigil_refusals "
+            "WHERE acknowledged_at IS NULL ORDER BY created_at"
+        ).fetchall()
+        if not rows:
+            print("No unreviewed !mem: refusals."); con.close(); return
+        now = datetime.now(timezone.utc).isoformat()
+        for rid, created, excerpt in rows:
+            print(f"[{created[:19]}] refused (secret): {excerpt}")
+            con.execute("UPDATE sigil_refusals SET acknowledged_at=? WHERE id=?", (now, rid))
+        con.commit(); con.close()
+        print(f"\nAcknowledged {len(rows)} refusal(s).")
+        return
     con = _db(args)
     root = args.project_root or os.getcwd()
     pid = _project_id(root)
@@ -454,30 +469,57 @@ def cmd_doctor(args):
             dur_str = f"  {dur}ms" if dur is not None else ""
             print(f"  [{recorded_at}] {event}{dur_str}  {excerpt[:80]}")
 
-        # Stop drop rate: count Stop vs UserPromptSubmit events to detect timeouts.
-        # A killed Stop hook leaves no hook_log entry — missing entries = lost candidates.
-        counts = dict(con.execute(
-            "SELECT event, COUNT(*) FROM hook_log GROUP BY event"
-        ).fetchall())
-        n_stop = counts.get("Stop", 0)
-        n_ups = counts.get("UserPromptSubmit", 0)
-        _min_events = _daemon_cfg.get("min_hook_events", 50)
-        if n_ups > 0:
-            print(f"\n  Stop/UPS events: {n_stop}/{n_ups}", end="")
-            if n_ups < _min_events:
-                print(f"  (insufficient data — need {_min_events}+ UPS events for drop-rate conclusions)")
-            else:
-                drop_pct = max(0, (n_ups - n_stop) / n_ups * 100)
-                warn_pct = _daemon_cfg.get("stop_drop_warn_pct", 2.0)
-                print(f"  ({drop_pct:.1f}% apparent drop rate)")
-                if drop_pct >= warn_pct:
-                    print(f"  WARN: >{warn_pct:.0f}% Stop drop rate — some turns are losing candidate memories.")
-                    print("  WARN: Check Stop hook timeout and system spawn latency.")
-        else:
-            print("\n  Stop/UPS events: 0/0  (no sessions recorded yet)")
     else:
         print("\nNo hook_log entries yet.")
         print("Verify: hooks are registered in settings.json and a real session has run.")
+
+    # Unrecovered transcripts — the data-loss signal that replaces the retired
+    # Stop/UPS drop rate. Mirrors recover_project's stat-only checks.
+    import glob as _glob, time as _time
+    from ccmem.paths import project_transcript_dir
+    from ccmem.killswitch import is_disabled, session_id_from_transcript
+    from ccmem.transcript import normalize_transcript_path
+    _init = con.execute("SELECT value FROM schema_meta WHERE key='initialized_at'").fetchone()
+    _init = _init[0] if _init else "1970-01-01T00:00:00Z"
+    _tdir = project_transcript_dir(os.getcwd())
+    _awaiting = 0
+    if os.path.isdir(_tdir):
+        for _f in _glob.glob(os.path.join(_tdir, "*.jsonl")):
+            try:
+                _st = os.stat(_f)
+            except OSError:
+                continue
+            _m = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(_st.st_mtime))
+            if _m <= _init:
+                continue
+            if is_disabled(home, session_id_from_transcript(_f)):
+                continue
+            _row = con.execute(
+                "SELECT updated_at FROM transcript_progress WHERE transcript_path=?",
+                (normalize_transcript_path(_f),),
+            ).fetchone()
+            if _row is not None and _m <= _row[0]:
+                continue
+            _awaiting += 1
+    print(f"\n  transcripts awaiting capture: {_awaiting}  (will sweep on next SessionStart)")
+
+    # Sigil refusals awaiting review.
+    _nref = con.execute(
+        "SELECT COUNT(*) FROM sigil_refusals WHERE acknowledged_at IS NULL"
+    ).fetchone()[0]
+    if _nref:
+        print(f"  Unreviewed !mem: refusals: {_nref} (run `ccmem list --refused`)")
+    else:
+        print("  Unreviewed !mem: refusals: 0")
+
+    # promptId drift: capture advanced a HWM (last_ordinal >= 0) but recorded no
+    # promptId — the transcript schema had no promptId on user records.
+    _drift = con.execute(
+        "SELECT COUNT(*) FROM transcript_progress WHERE last_ordinal >= 0 AND last_prompt_id IS NULL"
+    ).fetchone()[0]
+    if _drift:
+        print(f"  FAIL: {_drift} transcript(s) show promptId drift — no promptId on user "
+              "records; capture is on ordinal fallback.")
     con.close()
 
 
@@ -496,6 +538,8 @@ def main():
 
     lst = sub.add_parser("list", help="list active memories")
     lst.add_argument("--project-root")
+    lst.add_argument("--refused", action="store_true",
+                     help="show and acknowledge unreviewed !mem: refusals (contained secrets)")
 
     s = sub.add_parser("show", help="show memory + context")
     s.add_argument("id")
