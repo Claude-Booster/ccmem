@@ -142,28 +142,34 @@ def main() -> int:
                 r.ok("UserPromptSubmit: never exits 2", "1MB prompt handled")
 
         # --- kill switch -------------------------------------------------
-        # Threshold: interpreter_floor_ms + kill_switch_headroom_ms.
-        # The floor is the cost of spawning python on this machine (includes
-        # OS process-creation overhead and Defender/sync filter scans).
-        # Headroom covers stdlib imports before the CCMEM_DISABLED check plus
-        # load amplification when the full gate suite runs multiple spawns
-        # concurrently. See config.json comments and FACTS.md §11.
+        # Kill switch: the disabled path is allowed to write ONE bounded marker
+        # (finding #2 — tombstone the session so recovery never captures it), which
+        # means small I/O: importing ccmem.paths/ccmem.killswitch (stdlib-only) plus a
+        # mkdir+touch. Measure the MIN of a few samples so a single spawn-latency spike
+        # (this machine has +/-1-2s variance; FACTS §11) doesn't flap the gate, while a
+        # genuine regression (opening the DB, network) still trips even the min.
         floor = cfg.get("interpreter_floor_ms", 300)
         headroom = cfg.get("kill_switch_headroom_ms", 200)
         kill_threshold = floor + headroom
-        off = run_hook(cfg, event, base_payload(event), env_extra={"CCMEM_DISABLED": "1"})
+        samples = []
+        off = None
+        for _ in range(3):
+            off = run_hook(cfg, event, base_payload(event), env_extra={"CCMEM_DISABLED": "1"})
+            if off.timed_out or off.returncode != 0:
+                break
+            samples.append(off.elapsed_ms)
         if off.returncode != 0:
             r.fail(f"{event}: kill switch exits 0", f"rc={off.returncode}")
         elif injected_text(off.stdout).strip():
             r.fail(f"{event}: kill switch injects nothing", "produced context anyway")
-        elif off.elapsed_ms > kill_threshold:
-            r.fail(
-                f"{event}: kill switch is fast",
-                f"{off.elapsed_ms:.0f}ms > floor({floor})+headroom({headroom})={kill_threshold}ms "
-                "-- should short-circuit before any I/O",
-            )
         else:
-            r.ok(f"{event}: kill switch is fast", f"{off.elapsed_ms:.0f}ms <= {kill_threshold}ms")
+            best = min(samples) if samples else float("inf")
+            if best > kill_threshold:
+                r.fail(f"{event}: kill switch stays lean",
+                       f"min {best:.0f}ms > floor({floor})+headroom({headroom})={kill_threshold}ms "
+                       "-- disabled path may write one marker but must not do heavy I/O (DB/network)")
+            else:
+                r.ok(f"{event}: kill switch stays lean", f"min {best:.0f}ms <= {kill_threshold}ms")
 
     return r.report()
 
