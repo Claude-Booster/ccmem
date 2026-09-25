@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# hooks/mem_snapshot.py — PreCompact: mark pending candidates is_pre_compact=1
+# hooks/mem_snapshot.py — PreCompact: capture transcript turns, mark is_pre_compact=1
 import json
 import os
 import sys
@@ -14,10 +14,13 @@ def main() -> None:
     _t0 = time.monotonic()
     try:
         raw = sys.stdin.buffer.read()
-        json.loads(raw)
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            return
     except Exception:
         return
     try:
+        from ccmem.capture import capture_transcript
         from ccmem.db import connect, log_hook_event
         from ccmem.paths import maybe_migrate, resolve_home
 
@@ -26,14 +29,14 @@ def main() -> None:
         db_path = os.path.join(home, "mem.db")
         if not os.path.exists(db_path):
             return
+        transcript = payload.get("transcript_path", "")
+        session_id = payload.get("session_id", "unknown")
         con = connect(db_path)
-        con.execute(
-            "UPDATE candidates SET is_pre_compact=1 WHERE status='pending' AND is_pre_compact=0"
-        )
-        con.commit()
+        if transcript:
+            capture_transcript(con, transcript, session_id, is_pre_compact=True)
         _dur = int((time.monotonic() - _t0) * 1000)
         try:
-            log_hook_event(con, "PreCompact", "snapshot", duration_ms=_dur)
+            log_hook_event(con, "PreCompact", "capture+snapshot", duration_ms=_dur)
         except Exception:
             pass
         con.close()
