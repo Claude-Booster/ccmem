@@ -40,8 +40,6 @@ from _common import GATES_DIR, REPO_ROOT, GateResult, load_config
 # If DESIGN.md renames a hook, update this list in the same commit.
 DESIGN_HOOK_NAMES = {
     "mem_inject.py",
-    "mem_retrieve.py",
-    "mem_capture.py",
     "mem_flush.py",
     "mem_snapshot.py",
 }

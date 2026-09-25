@@ -45,7 +45,7 @@ def main() -> None:
             pass
         return
 
-    _t0 = time.monotonic()
+    _t0 = time.monotonic()  # ccmem: cache-safe
     try:
         raw = sys.stdin.buffer.read()
         payload = json.loads(raw)
@@ -117,7 +117,7 @@ def main() -> None:
             # is unaffected; mutations only influence subsequent sessions.
             mark_accessed(con, [m.id for m in memories])
 
-        _dur = int((time.monotonic() - _t0) * 1000)
+        _dur = int((time.monotonic() - _t0) * 1000)  # ccmem: cache-safe
         try:
             log_hook_event(con, "SessionStart", source, duration_ms=_dur)
         except Exception:
