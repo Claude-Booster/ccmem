@@ -89,6 +89,43 @@ def enqueue_candidate(
     return con.total_changes - before   # >0 inserted, 0 deduped
 
 
+def _handle_sigil(con, pair, text, scope, session_id, norm_path):
+    """Write a durable memory, record a refusal, or dedup.
+    Returns (wrote: bool, refused: bool): (True,False) inserted, (False,True) refused,
+    (False,False) deduped no-op."""
+    import hashlib
+    from ccmem.redact import redact
+    from ccmem.supersession import maybe_supersede
+    from ccmem.scoping import project_key, resolve_project_root
+    redacted = redact(text)
+    if redacted != text:
+        con.execute(
+            "INSERT INTO sigil_refusals (id, transcript_path, session_id, created_at, excerpt) "
+            "VALUES (?,?,?,?,?)",
+            (str(uuid.uuid4()), norm_path, session_id,
+             datetime.now(timezone.utc).isoformat(), redacted[:200]),
+        )
+        con.commit()
+        return (False, True)
+    h = hashlib.sha256(redacted.encode("utf-8", "replace")).hexdigest()
+    root = resolve_project_root(pair.cwd or os.getcwd())
+    pid, _ = project_key(root)
+    mem_id = str(uuid.uuid4())
+    before = con.total_changes
+    con.execute(
+        "INSERT OR IGNORE INTO memories "
+        "(id, type, content, scope, project_id, project_root, created_at, status, content_hash) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (mem_id, "preference", redacted, scope or "project", pid, root,
+         datetime.now(timezone.utc).isoformat(), "active", h),
+    )
+    con.commit()
+    if con.total_changes == before:
+        return (False, False)  # deduped by content_hash — identical sigil already stored
+    maybe_supersede(con, mem_id, None, pid)
+    return (True, False)
+
+
 def _read_hwm(con, norm_path):
     row = con.execute(
         "SELECT last_prompt_id, last_ordinal FROM transcript_progress WHERE transcript_path=?",
@@ -144,7 +181,18 @@ def capture_transcript(con, transcript_path, session_id, is_pre_compact=False):
             if pair.prompt_id is not None:
                 max_pid = pair.prompt_id
             continue
-        # (Task 5 inserts sigil handling here, before the candidate path.)
+        sigil_text, sigil_scope, _ = extract_sigil(pair.user_turn)
+        if sigil_text is not None:
+            wrote, refused = _handle_sigil(con, pair, sigil_text, sigil_scope, session_id, norm)
+            if wrote:
+                result.sigil_memories += 1
+            elif refused:
+                result.refusals += 1
+            # deduped no-op: neither counter moves
+            max_ord = max(max_ord, pair.ordinal)
+            if pair.prompt_id is not None:
+                max_pid = pair.prompt_id
+            continue
         score = score_turn(pair.user_turn, pair.assistant_turn)
         if score >= threshold:
             if enqueue_candidate(con, session_id, pair.prompt_id,
