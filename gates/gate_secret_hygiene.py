@@ -148,6 +148,27 @@ def check_live_db(r: GateResult) -> None:
     else:
         r.ok("no stored secrets in DB", f"{len(rows)} rows audited (content + context)")
 
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        crows = con.execute(
+            "SELECT id, user_turn, assistant_turn FROM candidates"
+        ).fetchall()
+        con.close()
+    except sqlite3.Error as exc:
+        r.fail("no stored secrets in candidates", f"could not read candidates in {db}: {exc}")
+        crows = []
+    cleaks = []
+    for cid, user_turn, assistant_turn in crows:
+        combined = (user_turn or "") + "\n" + (assistant_turn or "")
+        for pattern in LEAK_PATTERNS:
+            if pattern.search(combined):
+                cleaks.append(f"candidate {cid} matches {pattern.pattern[:28]}")
+                break
+    if cleaks:
+        r.fail("no stored secrets in candidates", "; ".join(cleaks[:5]))
+    else:
+        r.ok("no stored secrets in candidates", f"{len(crows)} candidates audited")
+
 
 def main() -> int:
     r = GateResult("secret hygiene")
