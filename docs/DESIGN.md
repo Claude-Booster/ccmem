@@ -23,20 +23,35 @@ happens. Model calls are optional and off by default until Phase 3.
 ```
 Session lifecycle        ccmem components            Storage
 ─────────────────────    ──────────────────────────  ──────────────────
-SessionStart hook    ──▶ render.py: retrieve +       mem.db (SQLite)
-                         dedup + format                memories table
-                         → additionalContext           candidates table
-                                                       session_injections
-UserPromptSubmit     ──▶ capture.py: parse !mem:    ─▶ memories (direct)
-hook                     annotation → direct write
+SessionStart hook    ──▶ mem_inject.py: bounded      mem.db (SQLite)
+(mem_inject.py)          recovery sweep of project     memories table
+                         transcripts → candidates/     candidates table
+                         sigil memories/refusals;      session_injections
+                         then inject memories +
+                         refusal notice
+                         → additionalContext
 
-Stop hook            ──▶ capture.py: lexical         candidates (pending)
-                         classifier → enqueue
+PreCompact hook      ──▶ mem_snapshot.py: capture    candidates (pending,
+(mem_snapshot.py)        new turn-pairs from            is_pre_compact=1)
+                         transcript → candidates;
+                         sigils → memories/refusals
 
-PreCompact hook      ──▶ capture.py: snapshot        candidates (flagged)
-                         pending candidates (no LLM)
+SessionEnd hook      ──▶ mem_flush.py: capture       candidates (pending)
+(mem_flush.py)           new turn-pairs from           mem.db
+                         transcript → candidates;
+                         sigils → memories/refusals;
+                         WAL checkpoint
 
-SessionEnd hook      ──▶ db.py: flush WAL            mem.db
+[UserPromptSubmit        REMOVED (2026-09-24) —
+ hook — removed]         sigil (!mem:) and per-turn
+                         injection opt-in retired;
+                         see R5 retirement note
+
+[Stop hook —             REMOVED (2026-09-24) —
+ removed]                heuristic scoring now runs
+                         over transcript turn-pairs
+                         at PreCompact/SessionEnd,
+                         not per-turn
 
 Out-of-band          ──▶ [Phase 3] async worker:     memories (extracted)
 (async worker or         LLM pass over candidates
@@ -44,7 +59,10 @@ ccmem digest)
 ```
 
 **Plugin entrypoints** (`hooks/`): one thin file per event, each wrapping
-`ccmem/` library calls. Hooks exit 0 on any error (R1).
+`ccmem/` library calls. Hooks exit 0 on any error (R1). Three surviving
+hooks: `mem_inject.py` (SessionStart), `mem_snapshot.py` (PreCompact),
+`mem_flush.py` (SessionEnd). `mem_retrieve.py` and `mem_capture.py` are
+removed.
 
 **Library** (`ccmem/`): `db.py`, `capture.py`, `retrieval.py`, `render.py`,
 `redact.py`, `scoping.py`. No business logic in hook files.
@@ -117,26 +135,36 @@ distinction: you preserve the *why* without paying for it every session.
 
 ### Phase 1 (no LLM in the path)
 
-**Explicit capture** (synchronous, highest priority):
+**Explicit capture** (durable, highest priority):
 
-The user types `!mem: fact text` anywhere in a prompt. The `UserPromptSubmit` hook
-extracts the annotation, writes it directly to `memories` as type `preference`, and
-strips the annotation before passing the prompt to Claude.
+The user types `!mem: fact text` anywhere in a prompt. The annotation is captured by
+reading the transcript JSONL during the snapshot hooks (`mem_snapshot.py` at PreCompact,
+`mem_flush.py` at SessionEnd) and the SessionStart recovery sweep (`mem_inject.py`).
+The sigil record is written directly to `memories` as type `preference` (redacted; a
+secret sigil is refused and recorded in `sigil_refusals`, surfaced at the next
+SessionStart injection block). Idempotent via `content_hash` — re-processing the same
+sigil record is a no-op.
 
 Sigil is `!mem:` — not `#`. A prompt starting with `#` is Claude Code's add-to-memory
 shortcut; using `#` as ccmem's sigil would collide and send the same content to both
 CLAUDE.md and ccmem's DB. `!` has no special meaning in Claude Code prompts.
 
-**Empirical note (2026-09-22):** `claude -p` (print/non-interactive mode) does not fire
-UserPromptSubmit hooks — attempted automated sigil test produced no hook payload (FACTS §8b).
-Gate tests for this capture path must invoke the hook directly with a synthesized payload,
-not via `claude -p`. Sigil preservation in live interactive sessions is `status: unconfirmed`
-pending a manual test.
+**R5 (per-turn injection opt-in) is retired as of 2026-09-24:** the `UserPromptSubmit`
+hook is removed; SessionStart (`mem_inject.py`) is the sole injection path. The
+`CCMEM_PER_TURN=1` opt-in and the associated byte-stability requirement are moot —
+the only per-turn `additionalContext` emitter is gone. See
+`docs/superpowers/specs/2026-09-24-snapshot-driven-capture-design.md`.
 
-**Heuristic flagging** (async, per-turn at Stop):
+**Empirical note (2026-09-22, superseded 2026-09-24):** `claude -p` (print/non-interactive
+mode) does not fire UserPromptSubmit hooks — this finding motivated removing the hook.
+Gate tests for sigil capture invoke `capture_transcript` directly with a synthesized
+transcript JSONL; no live hook payload is needed.
 
-The `Stop` hook receives `last_assistant_message` plus the prompt that produced it.
-A scored regex pass runs on both:
+**Heuristic flagging** (at PreCompact/SessionEnd, over transcript turn-pairs):
+
+`capture_transcript` (called by `mem_snapshot.py` and `mem_flush.py`) reads the
+project's transcript JSONL and scores each new turn-pair (user + assistant text) not
+yet recorded in `transcript_progress`. The same scored regex pass runs on both:
 
 | Pattern (examples) | Points |
 |---|---|
@@ -148,7 +176,8 @@ A scored regex pass runs on both:
 | `"the reason"`, `"because"`, `"in order to"` (supporting context) | 1 |
 
 Score ≥ threshold (default 4, configurable) → insert raw turn pair into `candidates`
-with `status='pending'`. The hook exits in <50ms regardless.
+with `status='pending'`. Capture is idempotent via `content_hash UNIQUE` on the
+`candidates` table — re-processing the same turn-pair is a no-op.
 
 **Honest assessment of rule-based Phase 1 extraction**: the classifier reliably flags
 *that* a turn may contain a decision. It cannot reliably extract *what* the decision
@@ -160,19 +189,15 @@ user to accept/reject/annotate each. Accepted candidates become structured memor
 This makes Phase 1 "explicit-plus-prompted-review", not "automated capture". That's
 honest. Automated extraction moves to Phase 3 with the LLM worker.
 
-**PreCompact hook** (don't-lose-it move, no model):
+**PreCompact hook** (`mem_snapshot.py`): fires before the context is compacted.
+Calls `capture_transcript` to score and enqueue any new turn-pairs from the transcript
+not yet in `transcript_progress`. Captured rows are marked `is_pre_compact=1` (reserved
+for review prioritisation; no consumer built yet). This is a DB write, not an LLM call.
+Extraction is always out-of-band (Phase 3).
 
-PreCompact fires before the context is compacted. It copies all `pending` candidates
-not yet extracted to the `candidates` table with `is_pre_compact=1`. This is a DB
-write, not an LLM call. PreCompact is not an extraction trigger — it's a snapshot so
-in-session candidates aren't lost if the session runs long.
-
-PreCompact is NOT an appropriate extraction point because: it fires mid-task when the
-user is busy, an LLM call there is a user-visible stall, and it fires erratically
-(never in short sessions, repeatedly in long ones). Extraction is always out-of-band.
-
-**SessionEnd hook**: flushes the SQLite WAL. No extraction. The ~1.5s budget is used
-for a clean DB close, nothing more.
+**SessionEnd hook** (`mem_flush.py`): calls `capture_transcript` for a final capture of
+new turn-pairs, then issues a WAL checkpoint. This is the guaranteed end-of-session
+flush; PreCompact may not fire in short sessions.
 
 ### Phase 3 (async LLM, off by default)
 
@@ -494,13 +519,18 @@ embeddings and the `session_injections` table to have real data.
 | Phase | Deliverable | New capabilities | Dependencies |
 |---|---|---|---|
 | 0 | Scaffolding | Repo structure, gates framework, plugin manifest, fixture DB, pyproject.toml | None |
-| 1 | Core loop | SQLite + FTS5, Stop flagging, explicit `!mem:` capture, SessionStart injection, basic CLI, manual candidate review | Phase 0 |
+| 1 | Core loop | SQLite + FTS5, snapshot capture at PreCompact/SessionEnd (transcript turn-pairs), explicit `!mem:` capture from transcript, SessionStart injection + recovery sweep, basic CLI, manual candidate review | Phase 0 |
 | 2 | Semantic retrieval | sqlite-vec, FastEmbed ONNX (384-dim), KNN retrieval, KNN supersession path | Phase 1 schema (embedding col nullable) |
 | 3 | LLM extraction | Async worker, budget cap, `ccmem digest`, `/ccmem` skill | Phase 1 candidates table |
 | 4 | Cache telemetry | Adaptive injection using resume/fork fields, session_injections table | Phase 1 SessionStart hook |
 | 5 | Eval harness | Re-explanation rate detector, `ccmem doctor --eval` | Phase 2 embeddings + Phase 4 injection tracking |
 
 ### Per-turn cost and the Stop hook problem
+
+> **SUPERSEDED (2026-09-24):** resolved by snapshot-driven capture — capture moved off
+> the per-turn path to PreCompact/SessionEnd/SessionStart, eliminating per-turn spawns
+> entirely. The analysis below is retained for history. See
+> `docs/superpowers/specs/2026-09-24-snapshot-driven-capture-design.md`.
 
 Stop fires on every turn. On Windows with hooks living inside a cloud sync boundary
 (OneDrive), each Stop spawn costs 3–5s. This is the main Phase 1 friction risk —
