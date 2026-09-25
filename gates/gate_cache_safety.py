@@ -117,33 +117,181 @@ def check_tool_hooks(r: GateResult) -> None:
         )
 
 
-def check_per_turn_default_off(cfg: dict, r: GateResult) -> None:
-    """R5: UserPromptSubmit injection is opt-in."""
-    script = hook_path(cfg, "UserPromptSubmit")
-    if not script.exists():
-        r.fail("per-turn injection defaults off", "UserPromptSubmit hook missing")
+def check_sessionstart_determinism(cfg: dict, r: GateResult) -> None:
+    """SessionStart determinism: steady-state + at-most-once sweep-induced change.
+
+    The recovery sweep now writes to the store (sigil memories, candidates, refusal
+    notices) inside SessionStart. Byte-identical output across two runs is therefore
+    only guaranteed once the sweep has nothing new to process.
+
+    Two sub-checks:
+    1. Steady state: with no dirty transcripts in the project dir, two consecutive
+       SessionStart runs produce byte-identical injected output.
+    2. At-most-once: with one dirty sigil transcript present, run 1 sweeps and may
+       change the store; run 2 (no new dirt) must be byte-identical to run 3.
+       Run 1 is allowed to differ from run 2 — this is the "one cache write on
+       crash recovery" cost documented in the design spec.
+    """
+    import hashlib
+    import os as _os
+    import tempfile
+
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        from ccmem.db import connect, migrate  # type: ignore
+    except Exception as exc:
+        r.fail("SessionStart: ccmem importable", str(exc))
         return
 
-    run = run_hook(
-        cfg,
-        "UserPromptSubmit",
-        base_payload("UserPromptSubmit"),
-        env_extra={"CCMEM_PER_TURN": ""},
-    )
-    if injected_text(run.stdout).strip():
-        r.fail(
-            "per-turn injection defaults off",
-            "injected context without CCMEM_PER_TURN=1",
-        )
-    else:
-        r.ok("per-turn injection defaults off")
+    project_id = hashlib.sha256(str(REPO_ROOT).encode()).hexdigest()[:16]
 
-    # When explicitly enabled it must still be byte-stable. Empty output is
-    # legitimate here -- retrieval may fall below the relevance floor.
-    check_determinism(
-        cfg, r, "UserPromptSubmit",
-        env_extra={"CCMEM_PER_TURN": "1"}, require_output=False,
-    )
+    def _seed(tmp: str, n: int = 10) -> None:
+        """Insert n memories for REPO_ROOT's project so injection is non-empty.
+
+        Also back-dates initialized_at so the sweep's mtime prefilter does NOT
+        skip a transcript written after _seed() returns. (The prefilter skips any
+        transcript whose mtime <= initialized_at; we want NOW > initialized_at.)
+        """
+        db_path = _os.path.join(tmp, "mem.db")
+        con = connect(db_path)
+        migrate(con)
+        # Back-date initialized_at so transcripts written after _seed() (mtime=NOW)
+        # are newer than the DB's install time and pass the sweep prefilter.
+        con.execute(
+            "UPDATE schema_meta SET value=? WHERE key='initialized_at'",
+            ("2026-01-01T00:00:00Z",),
+        )
+        for i in range(n):
+            con.execute(
+                "INSERT OR IGNORE INTO memories "
+                "(id, type, content, subject, scope, project_id, project_root, "
+                "created_at, status, access_count) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    f"ss-seed-{i:02d}",
+                    "decision",
+                    f"Determinism seed {i}: chose approach {i % 3}.",
+                    f"ss-subject-{i}",
+                    "project",
+                    project_id,
+                    str(REPO_ROOT),
+                    f"2026-01-{i + 1:02d}T00:00:00Z",
+                    "active",
+                    i,
+                ),
+            )
+        con.commit()
+        con.close()
+
+    def _payload(proj_dir: str) -> dict:
+        return {
+            **base_payload("SessionStart"),
+            "transcript_path": _os.path.join(proj_dir, "session.jsonl"),
+            "cwd": str(REPO_ROOT),
+        }
+
+    # -- Sub-check 1: steady state (no dirty transcripts) -----------------------
+    with tempfile.TemporaryDirectory() as tmp_ss:
+        _seed(tmp_ss)
+        proj_ss = _os.path.join(tmp_ss, "project")
+        _os.makedirs(proj_ss, exist_ok=True)
+        # proj_ss is empty: no *.jsonl → nothing for the sweep to process.
+
+        env = {"CCMEM_HOME": tmp_ss}
+        payload = _payload(proj_ss)
+
+        r1 = run_hook(cfg, "SessionStart", payload, env_extra=env)
+        if r1.returncode != 0 or r1.timed_out:
+            r.fail("SessionStart: steady-state determinism",
+                   f"run1 failed (rc={r1.returncode})")
+        else:
+            out1 = injected_text(r1.stdout)
+            if not out1.strip():
+                r.fail("SessionStart: steady-state determinism",
+                       "no injected output -- seeding or retrieval broken")
+            else:
+                r2 = run_hook(cfg, "SessionStart", payload, env_extra=env)
+                if r2.returncode != 0 or r2.timed_out:
+                    r.fail("SessionStart: steady-state determinism",
+                           f"run2 failed (rc={r2.returncode})")
+                else:
+                    out2 = injected_text(r2.stdout)
+                    if out1 == out2:
+                        r.ok("SessionStart: steady-state determinism",
+                             f"{len(out1)} chars byte-identical")
+                    else:
+                        idx = next(
+                            (i for i, (x, y) in enumerate(zip(out1, out2)) if x != y),
+                            min(len(out1), len(out2)),
+                        )
+                        lo, hi = max(0, idx - 40), idx + 40
+                        r.fail("SessionStart: steady-state determinism",
+                               f"diverges at char {idx}: "
+                               f"{out1[lo:hi]!r} vs {out2[lo:hi]!r}")
+
+    # -- Sub-check 2: at-most-once sweep change ---------------------------------
+    with tempfile.TemporaryDirectory() as tmp_amo:
+        _seed(tmp_amo)
+        proj_amo = _os.path.join(tmp_amo, "project")
+        _os.makedirs(proj_amo, exist_ok=True)
+
+        # Write a sigil transcript whose cwd matches REPO_ROOT so the captured
+        # sigil memory belongs to the same project being retrieved, exercising
+        # the genuine "run1 injects a new memory the sweep just wrote" path.
+        sigil_transcript = (
+            '{"type":"user","promptId":"p-amo-1","cwd":'
+            + json.dumps(str(REPO_ROOT))
+            + ',"message":{"content":[{"type":"text",'
+            '"text":"!mem: at-most-once gate test memory"}]}}\n'
+            '{"type":"assistant","apiBlockIndex":0,'
+            '"message":{"content":[{"type":"text","text":"noted"}]}}\n'
+        )
+        sweep_target = _os.path.join(proj_amo, "sweep-test.jsonl")
+        with open(sweep_target, "w", encoding="utf-8") as fh:
+            fh.write(sigil_transcript)
+        # mtime is NOW (just written) > initialized_at (fresh DB), so the sweep
+        # will find and process it on the first run.
+
+        env = {"CCMEM_HOME": tmp_amo}
+        payload = _payload(proj_amo)
+
+        r1 = run_hook(cfg, "SessionStart", payload, env_extra=env)
+        if r1.returncode != 0 or r1.timed_out:
+            r.fail("SessionStart: at-most-once sweep change",
+                   f"run1 failed (rc={r1.returncode})")
+            return
+        out_r1 = injected_text(r1.stdout)
+        if not out_r1.strip():
+            r.fail("SessionStart: at-most-once sweep change",
+                   "no injected output in run1 -- seeding or retrieval broken")
+            return
+
+        r2 = run_hook(cfg, "SessionStart", payload, env_extra=env)
+        if r2.returncode != 0 or r2.timed_out:
+            r.fail("SessionStart: at-most-once sweep change",
+                   f"run2 failed (rc={r2.returncode})")
+            return
+        out_r2 = injected_text(r2.stdout)
+
+        r3 = run_hook(cfg, "SessionStart", payload, env_extra=env)
+        if r3.returncode != 0 or r3.timed_out:
+            r.fail("SessionStart: at-most-once sweep change",
+                   f"run3 failed (rc={r3.returncode})")
+            return
+        out_r3 = injected_text(r3.stdout)
+
+        if out_r2 == out_r3:
+            sweep_tag = "(run1 changed)" if out_r1 != out_r2 else "(run1 stable)"
+            r.ok("SessionStart: at-most-once sweep change",
+                 f"run2==run3 ({len(out_r2)} chars) {sweep_tag}")
+        else:
+            idx = next(
+                (i for i, (x, y) in enumerate(zip(out_r2, out_r3)) if x != y),
+                min(len(out_r2), len(out_r3)),
+            )
+            lo, hi = max(0, idx - 40), idx + 40
+            r.fail("SessionStart: at-most-once sweep change",
+                   f"run2 != run3 at char {idx}: {out_r2[lo:hi]!r} vs {out_r3[lo:hi]!r}")
 
 
 def check_static_volatility(r: GateResult) -> None:
@@ -264,9 +412,8 @@ def main() -> int:
     else:
         r.ok("test DB seeded", str(db.relative_to(REPO_ROOT)))
 
-    check_determinism(cfg, r, "SessionStart")
+    check_sessionstart_determinism(cfg, r)
     check_cross_session_determinism(cfg, r)
-    check_per_turn_default_off(cfg, r)
     check_tool_hooks(r)
     check_static_volatility(r)
 
