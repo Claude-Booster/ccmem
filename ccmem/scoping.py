@@ -19,7 +19,7 @@ def resolve_project_root(cwd: str) -> str:
         common = r.stdout.strip()
         abs_common = os.path.normpath(os.path.join(cwd, common))
         return os.path.dirname(abs_common)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired):
         return cwd
 
 
