@@ -143,7 +143,7 @@ def _write_hwm(con, norm_path, session_id, last_prompt_id, last_ordinal):
         "last_prompt_id=excluded.last_prompt_id, last_ordinal=excluded.last_ordinal, "
         "session_id=excluded.session_id, updated_at=excluded.updated_at",
         (norm_path, last_prompt_id, last_ordinal, session_id,
-         datetime.now(timezone.utc).isoformat()),
+         datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")),
     )
     con.commit()
 

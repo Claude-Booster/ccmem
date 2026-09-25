@@ -24,14 +24,16 @@ def recover_project(con, home, project_dir, initialized_at, max_bytes, max_ms) -
         files = glob.glob(os.path.join(project_dir, "*.jsonl"))
     except Exception:
         return agg
-    files.sort(key=lambda f: os.path.getmtime(f), reverse=True)  # most-recent first
+    statted = []
     for f in files:
-        if time.monotonic() >= deadline or bytes_read >= max_bytes:
-            break
         try:
-            st = os.stat(f)
+            statted.append((f, os.stat(f)))
         except OSError:
             continue
+    statted.sort(key=lambda p: p[1].st_mtime, reverse=True)  # most-recent first
+    for f, st in statted:
+        if time.monotonic() >= deadline or bytes_read >= max_bytes:
+            break
         mtime_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(st.st_mtime))
         if mtime_iso <= initialized_at:
             continue  # stat-only prefilter; the real bound is per-turn in capture_transcript
