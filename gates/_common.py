@@ -54,7 +54,7 @@ def load_config() -> dict:
     path = GATES_DIR / "config.json"
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))
     if path.exists():
-        user = json.loads(path.read_text())
+        user = json.loads(path.read_text(encoding="utf-8"))
         for key, value in user.items():
             if isinstance(value, dict) and isinstance(cfg.get(key), dict):
                 cfg[key].update(value)
