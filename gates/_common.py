@@ -29,8 +29,6 @@ INJECTING_EVENTS = {"SessionStart", "UserPromptSubmit"}
 DEFAULT_CONFIG = {
     "hooks": {
         "SessionStart": "hooks/mem_inject.py",
-        "UserPromptSubmit": "hooks/mem_retrieve.py",
-        "Stop": "hooks/mem_capture.py",
         "SessionEnd": "hooks/mem_flush.py",
         "PreCompact": "hooks/mem_snapshot.py",
     },
@@ -38,8 +36,6 @@ DEFAULT_CONFIG = {
     # Claude Code timeouts -- we want headroom, not a photo finish.
     "budget_ms": {
         "SessionStart": 2000,
-        "UserPromptSubmit": 1500,
-        "Stop": 200,
         "SessionEnd": 1200,
         "PreCompact": 2000,
     },

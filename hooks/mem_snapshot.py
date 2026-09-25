@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 def main() -> None:
     if os.environ.get("CCMEM_DISABLED"):
         return
-    _t0 = time.monotonic()
+    _t0 = time.monotonic()  # ccmem: cache-safe
     try:
         raw = sys.stdin.buffer.read()
         payload = json.loads(raw)
@@ -34,7 +34,7 @@ def main() -> None:
         con = connect(db_path)
         if transcript:
             capture_transcript(con, transcript, session_id, is_pre_compact=True)
-        _dur = int((time.monotonic() - _t0) * 1000)
+        _dur = int((time.monotonic() - _t0) * 1000)  # ccmem: cache-safe
         try:
             log_hook_event(con, "PreCompact", "capture+snapshot", duration_ms=_dur)
         except Exception:
