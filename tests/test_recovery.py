@@ -40,16 +40,21 @@ def test_pre_install_transcript_never_swept(tmp_path):
 
 def test_partial_safe_under_byte_budget(tmp_path):
     con = _db()
+    # 3 transcripts with distinct salient turns so content_hash is unique per file
     for i in range(3):
-        _copy(tmp_path, f"t{i}.jsonl", "basic.jsonl")
+        p = tmp_path / f"t{i}.jsonl"
+        p.write_text(
+            f'{{"type":"user","promptId":"p1","cwd":"C:\\\\proj","message":{{"content":[{{"type":"text","text":"we decided to use approach{i} because it is simpler"}}]}}}}\n'
+            f'{{"type":"assistant","apiBlockIndex":0,"message":{{"content":[{{"type":"text","text":"the approach is X{i} because simpler"}}]}}}}\n',
+            encoding="utf-8",
+        )
     # tiny byte budget: sweep stops early, remainder captured on a second call
     r1 = recover_project(con, str(tmp_path), str(tmp_path), "2000-01-01T00:00:00Z", 1, 5000)
     r2 = recover_project(con, str(tmp_path), str(tmp_path), "2000-01-01T00:00:00Z", 10_000_000, 5000)
-    assert r1.candidates + r2.candidates >= 1  # nothing lost across partial sweeps
+    assert r1.candidates + r2.candidates == 3  # 3 files, 1 candidate each — nothing lost
 
 def test_concurrent_locked_db_defers_without_loss(tmp_path):
     con = _db(); p = _copy(tmp_path, "basic.jsonl", "basic.jsonl")
-    other = connect(os.path.join(":memory:"))  # placeholder; see note
     # Simulate lock by holding a write txn on a file-backed DB
     import sqlite3
     dbfile = str(tmp_path / "mem.db"); migrate(connect(dbfile))
@@ -86,3 +91,24 @@ def test_worktree_cwd_from_record_not_dirname(tmp_path):
     shutil.copy(os.path.join(FIX, "sigil.jsonl"), d / "s.jsonl")
     r = recover_project(con, str(tmp_path), str(d), "2000-01-01T00:00:00Z", 10_000_000, 5000)
     assert r.sigil_memories == 1
+
+def test_already_current_skip_fires(tmp_path):
+    """After capture marks a transcript current, a new salient turn appended to the
+    file must NOT be re-captured when the file mtime is reset to <= updated_at.
+    This guards against the timestamp format mismatch bug where updated_at stored
+    as microseconds+00:00 caused 'Z' > '.' so mtime_iso > ua and the skip never fired."""
+    from ccmem.capture import capture_transcript
+    con = _db()
+    p = _copy(tmp_path, "basic.jsonl", "basic.jsonl")
+    capture_transcript(con, p, "s1")               # marks current; sets updated_at=now
+    # Record the file mtime AFTER capture (file not modified by capture)
+    original_mtime = os.stat(p).st_mtime
+    # Append a new salient turn (score >= 4: "the approach is" = 3, "because" = 1)
+    with open(p, "a", encoding="utf-8") as fh:
+        fh.write('{"type":"user","promptId":"p3","cwd":"C:\\\\proj","message":{"content":[{"type":"text","text":"the approach is new because of this"}]}}\n')
+        fh.write('{"type":"assistant","apiBlockIndex":0,"message":{"content":[{"type":"text","text":"ok"}]}}\n')
+    # Reset mtime to the original (<=updated_at), simulating a same-second or pre-capture mtime
+    os.utime(p, (original_mtime, original_mtime))
+    # Sweep must skip: mtime_iso <= updated_at
+    r = recover_project(con, str(tmp_path), str(tmp_path), "2000-01-01T00:00:00Z", 10_000_000, 5000)
+    assert r.candidates == 0
