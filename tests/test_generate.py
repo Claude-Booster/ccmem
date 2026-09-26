@@ -237,6 +237,53 @@ def test_generate_project_hard_fails_if_memories_already_tracked():
             con.close()
 
 
+def test_generate_deterministic_across_access_count_mutation():
+    """Task 3: same DB state → byte-identical files, even after access_count changes."""
+    from ccmem.generate import generate_global, generate_project
+    import hashlib
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        con = sqlite3.connect(os.path.join(tmp, "mem.db"))
+        try:
+            pid = hashlib.sha256(tmp.encode()).hexdigest()[:16]
+            _seed(con, [
+                ("g1", "decision", "global A", None, "global", pid, tmp, "2026-01-01T00:00:00Z", "active", 5),
+                ("g2", "preference", "global B", None, "user", pid, tmp, "2026-01-02T00:00:00Z", "active", 2),
+                ("p1", "gotcha", "project C", None, "project", pid, tmp, "2026-01-03T00:00:00Z", "active", 10),
+                ("p2", "correction", "project D", None, "project", pid, tmp, "2026-01-04T00:00:00Z", "active", 0),
+            ])
+            claude = Path(tmp) / "claude"
+            g1 = generate_global(con, claude_home=claude).read_text(encoding="utf-8")
+            p1 = generate_project(con, tmp, require_gitignore=False).read_text(encoding="utf-8")
+            con.execute("UPDATE memories SET access_count = access_count + 1")
+            con.commit()
+            g2 = generate_global(con, claude_home=claude).read_text(encoding="utf-8")
+            p2 = generate_project(con, tmp, require_gitignore=False).read_text(encoding="utf-8")
+            assert g1 == g2
+            assert p1 == p2
+        finally:
+            con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            con.close()
+
+
+def test_cli_generate_global_only_runs():
+    """Task 4: the generate subcommand runs and reports the global file."""
+    import subprocess, sys
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        con = sqlite3.connect(os.path.join(tmp, "mem.db"))
+        _seed(con, [
+            ("g1", "decision", "global fact", None, "global", "p", "/x", "2026-01-01T00:00:00Z", "active", 0),
+        ])
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        con.close()
+        env = {**os.environ, "CCMEM_HOME": tmp}
+        result = subprocess.run(
+            [sys.executable, "-m", "ccmem.cli", "generate", "--global-only"],
+            env=env, capture_output=True, text=True, cwd=tmp, stdin=subprocess.DEVNULL,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "global:" in result.stdout
+
+
 def test_write_atomic_leaves_no_tmp():
     from ccmem.generate import _write_atomic
     with tempfile.TemporaryDirectory() as tmp:
