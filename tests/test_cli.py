@@ -9,10 +9,14 @@ REPO = Path(__file__).parent.parent
 def run_cli(*args, db_dir=None, input_text=None):
     env = os.environ.copy()
     env["CCMEM_HOME"] = db_dir or str(REPO / ".ccmem-test")
+    # When no input is piped, give an explicit DEVNULL stdin: inheriting pytest's
+    # captured stdin can raise OSError [WinError 6] on spawn (Windows), an
+    # intermittent flake in this suite.
+    stdin = None if input_text is not None else subprocess.DEVNULL
     return subprocess.run(
         [sys.executable, "-m", "ccmem.cli"] + list(args),
         capture_output=True, text=True, timeout=10,
-        input=input_text, env=env, cwd=str(REPO),
+        input=input_text, stdin=stdin, env=env, cwd=str(REPO),
     )
 
 
