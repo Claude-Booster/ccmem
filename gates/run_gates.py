@@ -25,16 +25,17 @@ REGISTRY = [
     # Phase 0 gate
     ("gate_scaffold",         0, "ccmem importable from repo; pytest collects; no stale test DB; no old schema names; config hook names match DESIGN.md"),
     # Phase 1 gates
+    # Hook-driving gates (gate_hook_contract, gate_cache_safety, gate_recovery_budget,
+    # gate_injection_format) were retired 2026-09-26: allowManagedHooksOnly blocks all
+    # ccmem hooks, so they tested never-invoked code. Injection is now @import of files
+    # written by `ccmem generate`. The exit-0/hostile-input discipline moved to
+    # tests/test_cli_robustness.py; format checks moved into gate_budget. See FACTS.md.
     ("gate_schema_contract",  1, "every table and column in DESIGN.md schema exists after migration"),
-    ("gate_hook_contract",    1, "hooks never block, never crash, correct event shape"),
-    ("gate_cache_safety",     1, "injected text is byte-stable; no tool-event context"),
     ("gate_secret_hygiene",   1, "secrets redacted on write (content + context); DB gitignored"),
     ("gate_budget",           1, "injected context within token and top-K caps"),
     ("gate_generate_determinism", 1, "generate output is byte-identical across repeated calls"),
-    ("gate_recovery_budget",  1, "SessionStart recovery stays within its wall-clock budget on an oversized transcript"),
     ("gate_phase1_notes",     1, "PHASE1-NOTES.md exists with substance before Phase 2"),
     ("gate_fts5_retrieval",   1, "FTS5 query on seeded DB returns expected memories"),
-    ("gate_injection_format", 1, "injected block has correct delimiter and line format"),
     ("gate_overlap_dedup",    1, "memory matching external CLAUDE.md line is suppressed"),
     ("gate_subject_supersession", 1, "duplicate subject supersedes older row"),
     ("gate_worktree_scoping", 1, "resolve_project_root identical for main and linked worktree"),
