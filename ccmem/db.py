@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS memories (
     status       TEXT NOT NULL DEFAULT 'active',
     supersedes   TEXT REFERENCES memories(id),
     embedding    BLOB,
-    content_hash TEXT
+    content_hash TEXT,
+    pinned       INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS candidates (
@@ -79,7 +80,7 @@ CREATE TABLE IF NOT EXISTS sigil_refusals (
     acknowledged_at TEXT
 );
 
-INSERT OR IGNORE INTO schema_meta VALUES ('schema_version', '2');
+INSERT OR IGNORE INTO schema_meta VALUES ('schema_version', '3');
 INSERT OR IGNORE INTO schema_meta VALUES ('embedding_dim', '384');
 INSERT OR IGNORE INTO schema_meta VALUES ('initialized_at', strftime('%Y-%m-%dT%H:%M:%SZ','now'));
 """
@@ -108,6 +109,12 @@ def migrate(con: sqlite3.Connection) -> None:
             con.commit()
         except Exception:
             pass  # column already exists
+    # Idempotent column addition for DBs created before schema_version 3 (pinned).
+    try:
+        con.execute("ALTER TABLE memories ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+        con.commit()
+    except Exception:
+        pass  # column already exists
     # Unique indexes on content_hash — created after ALTER TABLE loop so the
     # column is guaranteed to exist on both fresh and pre-v2 DBs.
     con.execute(

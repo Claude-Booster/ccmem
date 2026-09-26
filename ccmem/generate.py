@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os
 import sqlite3
+import subprocess
 from pathlib import Path
 
 from ccmem.retrieval import Memory
@@ -71,36 +72,82 @@ def _write_atomic(path: Path, content: str) -> None:
         raise
 
 
-def _ensure_ccmem_gitignore(ccmem_dir: Path, *, require: bool) -> None:
-    """Write .ccmem/.gitignore containing '*' (ignores the whole dir, incl. itself).
+def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess | None:
+    """Run a git command in cwd. Returns the result, or None if git is unavailable."""
+    try:
+        return subprocess.run(
+            ["git", *args], cwd=str(cwd), capture_output=True, text=True, timeout=5,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
 
-    Idempotent: skips the write if already exactly '*'. If `require` and protection
-    cannot be established/verified, raises RuntimeError so the caller writes nothing.
+
+def _ensure_ccmem_gitignore(ccmem_dir: Path, project_root: Path, *, require: bool) -> None:
+    """Protect .ccmem/ with a self-contained .gitignore='*', then VERIFY via git.
+
+    The write is the mechanism; git is the source of truth. Writing '*' does not
+    prove git ignores anything — the file could already be tracked, or a parent
+    rule could negate it. So after writing, verify:
+      - `git ls-files --error-unmatch .ccmem/memories.md` succeeding means the file
+        is TRACKED (gitignore does not untrack) — hard failure with rm --cached.
+      - `git check-ignore -q .ccmem/memories.md` must succeed (the path is ignored).
+    Degrades: if git is absent or project_root is not a work tree, there is nothing
+    to leak, so proceed. Only fails when git confirms the path is exposed.
     """
     gi = ccmem_dir / ".gitignore"
+    rel = ".ccmem/memories.md"
+
+    # 1. Establish the mechanism.
     try:
-        if gi.exists() and gi.read_text(encoding="utf-8").strip() == "*":
-            return
-        _write_atomic(gi, "*\n")
-        if gi.read_text(encoding="utf-8").strip() != "*":
-            raise RuntimeError("verification read did not return '*'")
+        if not (gi.exists() and gi.read_text(encoding="utf-8").strip() == "*"):
+            _write_atomic(gi, "*\n")
     except Exception as exc:
         if require:
             raise RuntimeError(
-                f"Could not establish .ccmem/.gitignore protection at {gi}: {exc}\n"
-                "Refusing to write memories.md unprotected. Fix directory permissions "
-                "or pass require_gitignore=False for a throwaway location."
+                f"Could not write .ccmem/.gitignore at {gi}: {exc}\n"
+                "Refusing to write memories.md unprotected."
             ) from exc
+        return
+
+    # 2. Verify git's actual behaviour.
+    inside = _git(["rev-parse", "--is-inside-work-tree"], project_root)
+    if inside is None or inside.returncode != 0 or inside.stdout.strip() != "true":
+        return  # no git, or not a repo — nothing to leak
+
+    tracked = _git(["ls-files", "--error-unmatch", rel], project_root)
+    if tracked is not None and tracked.returncode == 0:
+        if require:
+            raise RuntimeError(
+                f"{rel} is already tracked by git — .gitignore will NOT untrack it.\n"
+                f"Run: git -C {project_root} rm --cached {rel}\n"
+                "then re-run ccmem generate."
+            )
+        return
+
+    ignored = _git(["check-ignore", "-q", rel], project_root)
+    if ignored is not None and ignored.returncode != 0:
+        if require:
+            raise RuntimeError(
+                f"git does not ignore {rel} despite .ccmem/.gitignore — a parent "
+                f"gitignore rule may negate it.\n"
+                f"Check: git -C {project_root} check-ignore -v {rel}"
+            )
+        return
 
 
 def _fetch(con: sqlite3.Connection, scope_sql: str, params: tuple) -> list[Memory]:
-    """Selection-order fetch: recency DESC. (Seam: prepend 'pinned DESC,' and,
-    from Phase 2, 'rank,' ahead of created_at when those columns exist.)"""
+    """Selection-order fetch: pinned first, then recency.
+
+    ORDER BY pinned DESC, created_at DESC, id DESC. Pinned memories survive
+    truncation over newer unpinned ones. (Seam: insert 'rank,' after 'pinned DESC,'
+    once Phase 2 embedding scoring exists.) Render order is applied separately in
+    _render (created_at ASC, id ASC)."""
     rows = con.execute(
         "SELECT id, type, content, subject, scope, created_at, access_count "
         "FROM memories "
         f"WHERE status='active' AND ({scope_sql}) "
-        "ORDER BY created_at DESC, id DESC",
+        "ORDER BY pinned DESC, created_at DESC, id DESC",
         params,
     ).fetchall()
     return [Memory(*r) for r in rows]
@@ -131,7 +178,7 @@ def generate_project(
     from ccmem.scoping import project_key
     root = Path(project_root)
     ccmem_dir = root / ".ccmem"
-    _ensure_ccmem_gitignore(ccmem_dir, require=require_gitignore)  # protect BEFORE writing
+    _ensure_ccmem_gitignore(ccmem_dir, root, require=require_gitignore)  # protect BEFORE writing
     pid, _ = project_key(str(root))
     memories = _fetch(con, "scope='project' AND project_id=?", (pid,))
     content = _render(memories, PROJECT_CAP)

@@ -86,7 +86,8 @@ CREATE TABLE memories (
     access_count INTEGER DEFAULT 0,
     status      TEXT NOT NULL DEFAULT 'active',   -- active|superseded|deleted
     supersedes  TEXT REFERENCES memories(id),     -- what this replaced
-    embedding   BLOB                  -- NULL until Phase 2 (sqlite-vec)
+    embedding   BLOB,                 -- NULL until Phase 2 (sqlite-vec)
+    pinned      INTEGER NOT NULL DEFAULT 0        -- generate selects pinned first (survives cap truncation)
 );
 
 CREATE TABLE candidates (

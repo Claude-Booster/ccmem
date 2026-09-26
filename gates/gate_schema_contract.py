@@ -27,7 +27,7 @@ EXPECTED_TABLES: dict[str, list[str]] = {
         "id", "type", "content", "context", "subject",
         "scope", "project_id", "project_root",
         "created_at", "accessed_at", "access_count",
-        "status", "supersedes", "embedding", "content_hash",
+        "status", "supersedes", "embedding", "content_hash", "pinned",
     ],
     "candidates": [
         "id", "session_id", "prompt_id",
