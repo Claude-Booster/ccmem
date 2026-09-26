@@ -30,6 +30,7 @@ REGISTRY = [
     ("gate_cache_safety",     1, "injected text is byte-stable; no tool-event context"),
     ("gate_secret_hygiene",   1, "secrets redacted on write (content + context); DB gitignored"),
     ("gate_budget",           1, "injected context within token and top-K caps"),
+    ("gate_generate_determinism", 1, "generate output is byte-identical across repeated calls"),
     ("gate_recovery_budget",  1, "SessionStart recovery stays within its wall-clock budget on an oversized transcript"),
     ("gate_phase1_notes",     1, "PHASE1-NOTES.md exists with substance before Phase 2"),
     ("gate_fts5_retrieval",   1, "FTS5 query on seeded DB returns expected memories"),
