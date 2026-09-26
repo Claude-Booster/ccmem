@@ -262,6 +262,38 @@ are `status: unconfirmed` — not shown in the fetched docs.
 **Compaction** — project-root CLAUDE.md is re-read from disk and survives compaction;
 conversation-only instructions do not.
 
+> **Machine test 2026-09-26 (v2.1.278, Windows 11, allowManagedHooksOnly:true):**
+> Project CLAUDE.md `@import`d a generated memory file (`ccmem-memories.md`) containing
+> sentinel `CCMEM_SENTINEL_7F3A9Q2`. Test ran two headless turns with `--autocompact 100000`:
+> turn 1 loaded ~70k tokens of filler + 76k system prompt (146k total > threshold), triggering
+> autocompact (Haiku called with 70,737 input → 11 output tokens = compact summary). Sentinel
+> was returned in turn 2, after the filler content was compacted away. Conclusion: **@import
+> survives compaction** — CLAUDE.md (including @imports) is re-read from disk post-compaction
+> as documented. `status: machine-verified (2026-09-26)`.
+>
+> Note: Haiku's role (compaction vs. title generation) could not be isolated with 100% certainty
+> from transcript data alone; conclusion is based on 146k > 100k threshold being crossed and
+> sentinel surviving after filler content was no longer in the compacted context.
+
+**@import under managed settings** (`allowManagedHooksOnly:true`):
+> **Machine test 2026-09-26:** `claude -p` launched from a project directory whose CLAUDE.md
+> contained `@ccmem-memories.md` (a generated file). The sentinel in that file was returned
+> immediately, with no approval dialog observed in headless mode. `status: machine-verified
+> (2026-09-26)`. External-path absolute @import test: see below.
+
+**External-path @import** (absolute path in CLAUDE.md, file outside the project):
+> **Machine test 2026-09-26:** CLAUDE.md contained `@<absolute-windows-path>/ccmem-memories.md`.
+> Result: **NOT EXPANDED** — the model saw the raw `@<path>` reference as literal text in
+> CLAUDE.md; the imported file's content was NOT injected into context. The model explicitly
+> described seeing the @reference as text and offered to read the file separately via tools.
+> Likely cause: headless `-p` mode cannot respond to the one-time approval dialog that
+> external-path @imports trigger in interactive mode. `status: machine-verified (2026-09-26)`.
+>
+> **Implication for file location:** absolute external-path @imports do not work in headless
+> mode. Relative imports from the user-level `~/.claude/CLAUDE.md` (`@ccmem-memories.md`
+> resolving to `~/.claude/ccmem-memories.md`) have not been tested but should work: same
+> directory, no approval dialog needed, private storage outside any project repo.
+
 ---
 
 ## §7 — The API memory tool is NOT a Claude Code CLI feature

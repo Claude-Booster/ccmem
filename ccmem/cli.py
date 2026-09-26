@@ -387,6 +387,45 @@ def _check_defender_exclusions(
             print("  WARN: Python Lib is a read-only stdlib directory with no user-writable code.")
 
 
+def cmd_capture(args):
+    from ccmem.capture import capture_transcript, extract_sigil
+    from ccmem.killswitch import is_disabled, mark_disabled, session_id_from_transcript
+    from ccmem.paths import resolve_home
+    from ccmem.transcript import iter_turn_pairs
+
+    transcript_path = args.transcript
+    home = resolve_home()
+    session_id = args.session_id or session_id_from_transcript(transcript_path)
+
+    if is_disabled(home, session_id):
+        print(f"capture skipped: session {session_id[:8]} disabled by !mem:off")
+        return
+
+    # Scan for !mem:off sigil before processing any turns.
+    # Any turn whose user text starts with !mem:off (any scope) disables
+    # capture for the whole session and writes a tombstone so future sweeps
+    # also skip it.
+    for pair in iter_turn_pairs(transcript_path):
+        text, _scope, _ = extract_sigil(pair.user_turn)
+        if text is not None and text.strip().lower() == "off":
+            ok = mark_disabled(home, session_id)
+            status = "tombstoned" if ok else "WARNING: tombstone write failed"
+            print(f"capture disabled: !mem:off at turn {pair.ordinal}; {status}")
+            return
+
+    con = _db(args)
+    result = capture_transcript(con, transcript_path, session_id)
+    con.close()
+
+    print(
+        f"candidates={result.candidates}  "
+        f"sigil_memories={result.sigil_memories}  "
+        f"refusals={result.refusals}"
+    )
+    if result.promptid_drift:
+        print("WARN: promptId drift — transcript has no promptId on user records; ordinal fallback used")
+
+
 def cmd_doctor(args):
     from ccmem.paths import resolve_home, sync_root_for
     home = resolve_home()
@@ -552,6 +591,10 @@ def main():
 
     sub.add_parser("review", help="review pending candidates")
 
+    cap = sub.add_parser("capture", help="capture memories from a transcript JSONL file")
+    cap.add_argument("transcript", help="path to a Claude Code session JSONL transcript")
+    cap.add_argument("--session-id", help="override auto-detected session ID (default: transcript filename stem)")
+
     inj = sub.add_parser("inject", help="preview injection block")
     inj.add_argument("--dry-run", action="store_true")
     inj.add_argument("--project-root")
@@ -568,7 +611,8 @@ def main():
     dispatch = {
         "add": cmd_add, "list": cmd_list, "show": cmd_show,
         "delete": cmd_delete, "restore": cmd_restore,
-        "review": cmd_review, "inject": cmd_inject, "doctor": cmd_doctor,
+        "review": cmd_review, "inject": cmd_inject, "capture": cmd_capture,
+        "doctor": cmd_doctor,
     }
     if args.cmd not in dispatch:
         p.print_help()
