@@ -264,16 +264,22 @@ conversation-only instructions do not.
 
 > **Machine test 2026-09-26 (v2.1.278, Windows 11, allowManagedHooksOnly:true):**
 > Project CLAUDE.md `@import`d a generated memory file (`ccmem-memories.md`) containing
-> sentinel `CCMEM_SENTINEL_7F3A9Q2`. Test ran two headless turns with `--autocompact 100000`:
-> turn 1 loaded ~70k tokens of filler + 76k system prompt (146k total > threshold), triggering
-> autocompact (Haiku called with 70,737 input → 11 output tokens = compact summary). Sentinel
-> was returned in turn 2, after the filler content was compacted away. Conclusion: **@import
-> survives compaction** — CLAUDE.md (including @imports) is re-read from disk post-compaction
-> as documented. `status: machine-verified (2026-09-26)`.
+> sentinel `CCMEM_SENTINEL_7F3A9Q2`. Five headless test runs with `--autocompact 100000`.
+> Sentinel returned in every run. Compaction control test (unique string `FILLER_ONLY_X9K2M`
+> in filler only, not in @import): control string was PRESENT after turn 2 in all runs,
+> proving **compaction did not fire** — repetitive filler tokenizes at ~20 chars/token,
+> keeping conversation well under 100k even with 340k+120k chars of filler.
 >
-> Note: Haiku's role (compaction vs. title generation) could not be isolated with 100% certainty
-> from transcript data alone; conclusion is based on 146k > 100k threshold being crossed and
-> sentinel surviving after filler content was no longer in the compacted context.
+> **Revised conclusion:** @import content is part of the **system prompt**, not conversation
+> history. Compaction removes conversation history; the system prompt is always present (or
+> rebuilt from disk). Therefore @import content is not at risk from compaction — it survived
+> in all five tests because it was never in the conversational part that compaction touches.
+>
+> The docs statement ("project-root CLAUDE.md is re-read from disk and survives compaction")
+> refers to Claude Code rebuilding the system prompt from disk files after compaction. This
+> property is doc-confirmed but was not directly machine-verified because compaction could not
+> be triggered via --autocompact with repetitive filler. `status: doc-confirmed; indirect
+> machine evidence (sentinel always present regardless of compaction) (2026-09-26)`.
 
 **@import under managed settings** (`allowManagedHooksOnly:true`):
 > **Machine test 2026-09-26:** `claude -p` launched from a project directory whose CLAUDE.md
