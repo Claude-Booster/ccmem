@@ -561,6 +561,21 @@ def cmd_doctor(args):
               "records; capture is on ordinal fallback.")
     con.close()
 
+    # Tombstoned sessions — skipped by !mem:off sigil.
+    from ccmem.killswitch import list_disabled
+    _disabled_dir = Path(home) / "disabled"
+    _tombstoned = list_disabled(home)
+    if _tombstoned:
+        print(f"\n  Tombstoned sessions (!mem:off): {len(_tombstoned)}")
+        for sid in _tombstoned[:10]:
+            print(f"    {sid}")
+        if len(_tombstoned) > 10:
+            print(f"    ... and {len(_tombstoned) - 10} more")
+        print(f"  To un-skip: delete the marker file from {_disabled_dir}")
+        print( "  (deleting restores the session to awaiting-capture state)")
+    else:
+        print("\n  Tombstoned sessions (!mem:off): 0")
+
 
 def main():
     p = argparse.ArgumentParser(prog="ccmem")
