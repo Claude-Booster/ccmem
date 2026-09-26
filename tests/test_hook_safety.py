@@ -75,7 +75,7 @@ def _default_timeout_s() -> float:
     import json as _json
     cfg_path = REPO / "gates" / "config.json"
     try:
-        cfg = _json.loads(cfg_path.read_text())
+        cfg = _json.loads(cfg_path.read_text(encoding="utf-8"))
         budgets = [v for v in cfg.get("budget_ms", {}).values() if isinstance(v, (int, float))]
         max_budget_ms = max(budgets) if budgets else 6000
         return (max_budget_ms * 1.5) / 1000
@@ -153,7 +153,7 @@ def _kill_switch_threshold_ms() -> float:
     import json as _json
     cfg_path = REPO / "gates" / "config.json"
     try:
-        cfg = _json.loads(cfg_path.read_text())
+        cfg = _json.loads(cfg_path.read_text(encoding="utf-8"))
         return cfg["interpreter_floor_ms"] + cfg["kill_switch_headroom_ms"]
     except Exception:
         return 2500.0
