@@ -12,7 +12,7 @@ def main() -> int:
     if db is None:
         r.fail("test DB seeded", err)
         return r.report()
-    r.ok("test DB seeded", str(db.relative_to(REPO_ROOT)))
+    r.ok("test DB seeded", str(db))
 
     sys.path.insert(0, str(REPO_ROOT))
     try:

@@ -300,6 +300,27 @@ conversation-only instructions do not.
 > resolving to `~/.claude/ccmem-memories.md`) have not been tested but should work: same
 > directory, no approval dialog needed, private storage outside any project repo.
 
+### Hook gates retired (2026-09-26)
+
+Because `allowManagedHooksOnly:true` blocks every ccmem hook, injection moved to
+`@import` of files written by `ccmem generate` (Option E). Four gates that drove hooks
+via `run_hook` were therefore testing code Claude Code never invokes, and were retired
+in their own commit:
+
+| Retired gate | What it tested | Where the concern went |
+|---|---|---|
+| `gate_hook_contract` | hooks exit 0 on hostile input, kill switch, budgets | `tests/test_cli_robustness.py` (exit-0 + hostile input on `ccmem capture`/`generate`) |
+| `gate_cache_safety` | SessionStart injected text byte-stable | `gate_generate_determinism` (generated files byte-identical) |
+| `gate_recovery_budget` | SessionStart recovery sweep wall-clock budget | n/a — recovery sweep only ran inside the hook |
+| `gate_injection_format` | injected block markers / line format | `gate_budget._check_file` (markers, count line parseable, no partial lines) |
+
+At retirement, only `gate_hook_contract` was actually red (Defender-driven kill-switch
+timing); the other three were green but validated dead paths (and `gate_injection_format`
+asserted the *old* `<ccmem-memories>` format that `generate` abandons). `gate_scaffold`
+was red as collateral — the hook gates left `.ccmem-test/` in the repo, tripping its
+"absent at rest" check; removing them fixed it. The hook *scripts* (`hooks/*.py`) remain
+in the tree as dead code for now; only the gates were removed.
+
 ---
 
 ## §7 — The API memory tool is NOT a Claude Code CLI feature

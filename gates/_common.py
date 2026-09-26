@@ -15,12 +15,17 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 GATES_DIR = Path(__file__).resolve().parent
 REPO_ROOT = GATES_DIR.parent
+
+# Throwaway test home for gates. Kept OUT of the repo tree so a gate run never
+# leaves a .ccmem-test/ that trips gate_scaffold's "absent at rest" check.
+TEST_HOME = Path(tempfile.gettempdir()) / "ccmem-gate-test"
 
 # Events whose stdout Claude Code injects into the model's context.
 # See docs/FACTS.md §1 -- re-verify before trusting.
@@ -137,7 +142,7 @@ def run_hook(
 
     env = os.environ.copy()
     env.setdefault("CLAUDE_PROJECT_DIR", str(REPO_ROOT))
-    env.setdefault("CCMEM_HOME", str(REPO_ROOT / ".ccmem-test"))
+    env.setdefault("CCMEM_HOME", str(TEST_HOME))
     if env_extra:
         env.update(env_extra)
 
@@ -231,8 +236,8 @@ def ensure_seeded_db(rows: int = 400) -> tuple[Path | None, str]:
     import hashlib
 
     sys.path.insert(0, str(REPO_ROOT))
-    home = REPO_ROOT / ".ccmem-test"
-    home.mkdir(exist_ok=True)
+    home = TEST_HOME
+    home.mkdir(parents=True, exist_ok=True)
     db = home / "mem.db"
 
     try:
