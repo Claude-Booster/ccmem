@@ -3,6 +3,8 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
+REPO = Path(__file__).parent.parent
+
 
 def _seed(con, memories):
     from ccmem.db import migrate
@@ -275,13 +277,17 @@ def test_cli_generate_global_only_runs():
         ])
         con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         con.close()
-        env = {**os.environ, "CCMEM_HOME": tmp}
+        # CCMEM_HOME → DB location; PYTHONPATH → make ccmem importable with cwd=tmp;
+        # USERPROFILE/HOME → redirect ~ so the global file lands in tmp, not real ~/.claude.
+        env = {**os.environ, "CCMEM_HOME": tmp, "PYTHONPATH": str(REPO),
+               "USERPROFILE": tmp, "HOME": tmp}
         result = subprocess.run(
             [sys.executable, "-m", "ccmem.cli", "generate", "--global-only"],
             env=env, capture_output=True, text=True, cwd=tmp, stdin=subprocess.DEVNULL,
         )
         assert result.returncode == 0, result.stderr
         assert "global:" in result.stdout
+        assert (Path(tmp) / ".claude" / "ccmem-memories.md").exists()  # redirected, real ~ untouched
 
 
 def test_write_atomic_leaves_no_tmp():
