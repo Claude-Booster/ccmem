@@ -19,7 +19,14 @@
 5. **Truncation is visible.** Every block carries a deterministic count line: `<!-- ccmem: 12 of 47 memories shown (400 token cap) -->`. Doctor warns when `shown < total`.
 6. **Dead hook gates retired.** `gate_hook_contract`, `gate_recovery_budget`, `gate_injection_format`, and `gate_cache_safety` test hooks that `allowManagedHooksOnly` permanently blocks. They are retired in their own commit with the reasoning recorded in FACTS.md; the R1 exit-0 and hostile-input discipline moves to a CLI-entrypoint test.
 
-**Open flag for the user (not blocking):** the DESIGN schema has no `pinned` column, so the selection ORDER BY is recency-only for now (`created_at DESC, id DESC`). The code leaves a single, obvious seam where `pinned DESC,` and (Phase 2) `rank,` slot in ahead of recency. Adding a `pinned` column is a separate schema change — say the word if you want it in this plan.
+## Revision note (rev 3 — four follow-ups from the Task 1–2 review)
+
+1. **Pinned is now real.** A `pinned INTEGER NOT NULL DEFAULT 0` column is added to `memories` (schema_version → 3, idempotent ALTER). Selection order is `pinned DESC, created_at DESC, id DESC`; render order unchanged. Pinned memories survive truncation over newer unpinned ones. If pinned memories alone exceed the cap they still truncate (hard ceiling) and the count line shows `shown < total`, which doctor surfaces as a loud warning.
+2. **Gitignore verifies git, not the write.** `_ensure_ccmem_gitignore` writes `*` then verifies with `git check-ignore -q` (must be ignored) and `git ls-files --error-unmatch` (must NOT be tracked → hard fail with `git rm --cached` guidance). Degrades when git is absent or the path isn't a work tree (nothing to leak); only fails when git confirms exposure.
+3. **gate_injection_format's concern moved, not deleted.** Its checks (both markers, count line parseable, no partial memory lines, empty→stub) are ported into `gate_budget._check_file`, which already reads the generated files. The gate is still retired in Task 7.
+4. **Scoping test pollution is a real bug** (Task 10). A transient nested `.git` in `gates/` makes `git rev-parse --git-common-dir` resolve to `gates` instead of the repo root. `scoping.py` itself is stateless (verified). Task 10 bisects the suite to find which test leaves that state and fixes the leak. Deferred past Task 3 per the review, but must not survive the plan.
+
+**Deferred flag — `gate_phase1_notes` measures the wrong thing.** It was written for hook-based explicit capture over a week of dogfooding that never happened (hooks got blocked mid-way). It should be rewritten to assess the capture/generate workflow instead. Not changed here; flagged so it gets rewritten before Phase 1 is declared done, rather than sitting red forever or being quietly deleted.
 
 ## Global Constraints
 
@@ -642,7 +649,16 @@ def seed_mixed(db_path: str, project_root: str, n: int) -> None:
     con.close()
 
 
+import re
+
+_COUNT_RE = re.compile(r"<!-- ccmem: (\d+) of (\d+) memories shown \(\d+ token cap\) -->")
+_MEM_LINE_RE = re.compile(r"^- \[\w+\] .+$")  # well-formed memory line; no partial lines
+
+
 def _check_file(r: GateResult, label: str, path: Path, cap: int) -> None:
+    # Ported from the retired gate_injection_format: the injected block must be
+    # well-formed — both markers present, count line parseable, no partial memory
+    # lines. The concern outlived the gate; it now rides on the generated file.
     if not path.exists():
         r.fail(f"{label} written", f"missing: {path}")
         return
@@ -660,10 +676,16 @@ def _check_file(r: GateResult, label: str, path: Path, cap: int) -> None:
         r.fail(f"{label} delimited", "missing <!-- ccmem --> / <!-- /ccmem -->")
     else:
         r.ok(f"{label} delimited")
-    if "memories shown" not in text:
-        r.fail(f"{label} has count line", "no truncation-signal count line")
+    m = _COUNT_RE.search(text)
+    if not m:
+        r.fail(f"{label} count line parseable", "no '<!-- ccmem: N of M memories shown (C token cap) -->'")
     else:
-        r.ok(f"{label} has count line")
+        r.ok(f"{label} count line parseable", f"{m.group(1)} of {m.group(2)}")
+    bad = [ln for ln in text.splitlines() if ln.startswith("- [") and not _MEM_LINE_RE.match(ln)]
+    if bad:
+        r.fail(f"{label} no partial memory lines", f"malformed: {bad[0]!r}")
+    else:
+        r.ok(f"{label} no partial memory lines")
 
 
 def main() -> int:
@@ -1004,6 +1026,32 @@ EOF
   - Global cap: 400 tokens (`~/.claude/ccmem-memories.md`); project cap: 800 tokens (`<project>/.ccmem/memories.md`).
   - Absent-file behavior: generate always writes a file (empty DB → `0 of 0` stub), so @import never points at nothing.
   - Then await the decision on adding `@ccmem-memories.md` and `@.ccmem/memories.md`.
+
+---
+
+## Task 10: Fix scoping test order-pollution (rev-3 #4)
+
+**Symptom:** `tests/test_scoping.py::test_resolve_returns_repo_root_for_subdir` passes in isolation but fails in the full suite, returning `<repo>/gates` instead of `<repo>`. Cause: `git rev-parse --git-common-dir` run from `gates/` returns a bare `.git` (relative), which only happens when a nested `.git` transiently exists in `gates/`. `scoping.py` is stateless — the state is created by some other test.
+
+**Files:**
+- Investigate: `tests/` (find the test that creates a git repo or `.git` at/under `gates/`, or leaks a `cwd`/`os.chdir`)
+- Fix: whichever test owns the leak (scope its git repo to a `tmp_path`, restore cwd, or stop writing under the repo tree)
+
+- [ ] **Step 1: Reproduce and bisect.** Run `python -m pytest tests/test_scoping.py::test_resolve_returns_repo_root_for_subdir tests/<suspect>.py -q` pairing the scoping test after each hook/recovery test module until it fails. The hook tests spawn `hooks/*.py` subprocesses and write to `REPO/.ccmem-test`; a capture/recovery path that runs `git` with an unintended cwd is the prime suspect.
+- [ ] **Step 2: Identify the exact shared state** — nested `.git` under `gates/`, a reused tmpdir, a real `~/.claude` read, or an unrestored `os.chdir`. Name it in the commit.
+- [ ] **Step 3: Fix the leak at its source** (isolate to `tmp_path`, restore cwd in a fixture, etc.). Do not weaken the scoping assertion to paper over it.
+- [ ] **Step 4: Verify** — run the full suite twice; `test_resolve_returns_repo_root_for_subdir` passes both times, and no `.ccmem-test/` or stray `.git` is left under the repo.
+- [ ] **Step 5: Commit**
+
+```bash
+git add tests/
+git commit -m "$(cat <<'EOF'
+fix(tests): stop <culprit> leaking git state into gates/ (scoping test flake)
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+EOF
+)"
+```
 
 ---
 
