@@ -598,6 +598,37 @@ def cmd_doctor(args):
     else:
         print("\n  Tombstoned sessions (!mem:off): 0")
 
+    # --- Option E @import health ---
+    import re as _re
+    from ccmem.scoping import resolve_project_root
+
+    def _report_tier(mem_file: Path, claude_md: Path, import_line: str, gen_cmd: str):
+        if mem_file.exists():
+            txt = mem_file.read_text(encoding="utf-8")
+            toks = (len(txt) + 3) // 4
+            print(f"  file OK:   {mem_file}  (~{toks} tokens)")
+            m = _re.search(r"<!-- ccmem: (\d+) of (\d+) memories shown", txt)
+            if m and int(m.group(1)) < int(m.group(2)):
+                print(f"  WARN: only {m.group(1)} of {m.group(2)} memories shown -- "
+                      f"prune old memories or raise the cap ({gen_cmd}).")
+        else:
+            print(f"  file MISSING: {mem_file}  -> run: {gen_cmd}")
+        if claude_md.exists():
+            if import_line in claude_md.read_text(encoding="utf-8"):
+                print(f"  @import OK: {import_line} present in {claude_md}")
+            else:
+                print(f"  @import MISSING: add '{import_line}' to {claude_md}")
+        else:
+            print(f"  {claude_md} not found (create it to enable @import)")
+
+    print("\nOption E @import health:")
+    _claude_home = Path(os.path.expanduser("~")) / ".claude"
+    _report_tier(_claude_home / "ccmem-memories.md", _claude_home / "CLAUDE.md",
+                 "@ccmem-memories.md", "python -m ccmem.cli generate --global-only")
+    _proj = resolve_project_root(os.getcwd())
+    _report_tier(Path(_proj) / ".ccmem" / "memories.md", Path(_proj) / "CLAUDE.md",
+                 "@.ccmem/memories.md", "python -m ccmem.cli generate --project-only")
+
 
 def main():
     p = argparse.ArgumentParser(prog="ccmem")
