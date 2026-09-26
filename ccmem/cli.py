@@ -426,6 +426,28 @@ def cmd_capture(args):
         print("WARN: promptId drift — transcript has no promptId on user records; ordinal fallback used")
 
 
+def cmd_generate(args):
+    from ccmem.generate import GLOBAL_CAP, PROJECT_CAP, generate_global, generate_project
+    from ccmem.scoping import resolve_project_root
+
+    con = _db(args)
+    project_root = getattr(args, "project_root", None) or resolve_project_root(os.getcwd())
+    project_only = getattr(args, "project_only", False)
+    global_only = getattr(args, "global_only", False)
+
+    if not project_only:
+        path = generate_global(con, claude_home=Path(os.path.expanduser("~")) / ".claude")
+        tokens = (len(path.read_text(encoding="utf-8")) + 3) // 4
+        print(f"global:  {path}  (~{tokens} / {GLOBAL_CAP} tokens)")
+
+    if not global_only:
+        path = generate_project(con, project_root)
+        tokens = (len(path.read_text(encoding="utf-8")) + 3) // 4
+        print(f"project: {path}  (~{tokens} / {PROJECT_CAP} tokens)")
+
+    con.close()
+
+
 def cmd_doctor(args):
     from ccmem.paths import resolve_home, sync_root_for
     home = resolve_home()
@@ -614,6 +636,13 @@ def main():
     inj.add_argument("--dry-run", action="store_true")
     inj.add_argument("--project-root")
 
+    gen = sub.add_parser("generate", help="write memory markdown files for @import")
+    gen.add_argument("--global-only", action="store_true",
+                     help="write only ~/.claude/ccmem-memories.md")
+    gen.add_argument("--project-only", action="store_true",
+                     help="write only <project>/.ccmem/memories.md")
+    gen.add_argument("--project-root", help="override project root (default: git root of cwd)")
+
     doc = sub.add_parser("doctor", help="health check")
     doc.add_argument(
         "--save-baseline", action="store_true",
@@ -627,7 +656,7 @@ def main():
         "add": cmd_add, "list": cmd_list, "show": cmd_show,
         "delete": cmd_delete, "restore": cmd_restore,
         "review": cmd_review, "inject": cmd_inject, "capture": cmd_capture,
-        "doctor": cmd_doctor,
+        "generate": cmd_generate, "doctor": cmd_doctor,
     }
     if args.cmd not in dispatch:
         p.print_help()
