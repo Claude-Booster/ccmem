@@ -28,6 +28,10 @@
 
 **Deferred flag — `gate_phase1_notes` measures the wrong thing.** It was written for hook-based explicit capture over a week of dogfooding that never happened (hooks got blocked mid-way). It should be rewritten to assess the capture/generate workflow instead. Not changed here; flagged so it gets rewritten before Phase 1 is declared done, rather than sitting red forever or being quietly deleted.
 
+**Deferred flag — `gate_overlap_dedup` is a fifth hook-driver, and `generate` dropped the dedup feature.** Task 7 retired four gates; `gate_overlap_dedup` also drives the SessionStart hook (`run_hook`) and is green, but it tests DESIGN §Q5's CLAUDE.md/MEMORY.md overlap suppression — which `generate._render` does **not** implement. So the feature the gate protects is currently absent from the live path. Two coupled decisions for the user: (a) should `generate` port the lexical dedup against loaded CLAUDE.md/MEMORY.md, and (b) if so, rewrite `gate_overlap_dedup` to assert on the generated files (like `gate_budget`) instead of driving the hook; if not, retire it too. It does not pollute `.ccmem-test` (uses its own tempdir), so it does not threaten phase-1 stability — hence deferred, not blocking.
+
+**Note — gate test home moved out of the repo.** `_common.ensure_seeded_db` and `run_hook`'s default `CCMEM_HOME` wrote to `REPO/.ccmem-test`, which re-broke `gate_scaffold` after every run. Both now use `TEST_HOME = <system-temp>/ccmem-gate-test`, so gate runs leave no artifact in the repo tree.
+
 ## Global Constraints
 
 - Python 3.11+, stdlib-first.
@@ -1029,29 +1033,37 @@ EOF
 
 ---
 
-## Task 10: Fix scoping test order-pollution (rev-3 #4)
+## Task 10: Fix scoping flake — subprocess stdin handle, not shared state (rev-3 #4) — DONE
 
-**Symptom:** `tests/test_scoping.py::test_resolve_returns_repo_root_for_subdir` passes in isolation but fails in the full suite, returning `<repo>/gates` instead of `<repo>`. Cause: `git rev-parse --git-common-dir` run from `gates/` returns a bare `.git` (relative), which only happens when a nested `.git` transiently exists in `gates/`. `scoping.py` is stateless — the state is created by some other test.
+**Corrected root cause (the review's shared-state hypothesis was wrong).** The failure
+value is *exactly* `cwd` (`<repo>/gates`), which is what `resolve_project_root` returns
+from its `except (OSError, subprocess.TimeoutExpired): return cwd` fallback. On Windows,
+`subprocess.run(["git", ...])` without an explicit stdin inherits the parent's stdin
+handle; under pytest's output capture that handle can be invalid, so the spawn raises
+`OSError [WinError 6] The handle is invalid`. `resolve_project_root` swallows it and
+falls back to `cwd`, so the assertion `== <repo>` fails with `<repo>/gates`.
 
-**Files:**
-- Investigate: `tests/` (find the test that creates a git repo or `.git` at/under `gates/`, or leaks a `cwd`/`os.chdir`)
-- Fix: whichever test owns the leak (scope its git repo to a `tmp_path`, restore cwd, or stop writing under the repo tree)
+Evidence: (a) a diagnostic autouse fixture watching for `gates/.git` after every test
+found it **never appears** — there is no nested repo and no shared state; (b) the same
+`WinError 6` intermittently hit `test_cli.py`'s own `subprocess.run` calls in the same
+runs; (c) `scoping.py` is stateless. This is a **production bug**, not just a test flake:
+in any context with a bad stdin handle (some hook/subprocess setups), scoping silently
+mis-attributes memories to the wrong project.
 
-- [ ] **Step 1: Reproduce and bisect.** Run `python -m pytest tests/test_scoping.py::test_resolve_returns_repo_root_for_subdir tests/<suspect>.py -q` pairing the scoping test after each hook/recovery test module until it fails. The hook tests spawn `hooks/*.py` subprocesses and write to `REPO/.ccmem-test`; a capture/recovery path that runs `git` with an unintended cwd is the prime suspect.
-- [ ] **Step 2: Identify the exact shared state** — nested `.git` under `gates/`, a reused tmpdir, a real `~/.claude` read, or an unrestored `os.chdir`. Name it in the commit.
-- [ ] **Step 3: Fix the leak at its source** (isolate to `tmp_path`, restore cwd in a fixture, etc.). Do not weaken the scoping assertion to paper over it.
-- [ ] **Step 4: Verify** — run the full suite twice; `test_resolve_returns_repo_root_for_subdir` passes both times, and no `.ccmem-test/` or stray `.git` is left under the repo.
-- [ ] **Step 5: Commit**
+**Fix (applied):**
+- `ccmem/scoping.py`: pass `stdin=subprocess.DEVNULL` to the `git rev-parse` call so the
+  spawn always has a valid handle and never falls back spuriously.
+- `tests/test_cli.py`: pass `stdin=DEVNULL` when no input is piped (kills the correlated
+  `WinError 6` flakes in that file).
 
-```bash
-git add tests/
-git commit -m "$(cat <<'EOF'
-fix(tests): stop <culprit> leaking git state into gates/ (scoping test flake)
+**Verified:** full-suite run after the fix — `test_scoping` passes and the `test_cli`
+WinError-6 cluster is gone. Remaining suite failures are pre-existing timeout/Defender/
+Windows-file-lock flakes on the (now dead) `hooks/*.py` tests, unrelated to this work.
 
-Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
-EOF
-)"
-```
+**Follow-on flag:** the `test_hook_*.py` suite tests the hooks blocked by
+`allowManagedHooksOnly` and is chronically flaky on Defender timing. Consistent with the
+gate retirement (Task 7), those hook *tests* are candidates for removal too — flagged for
+the user, not done here.
 
 ---
 

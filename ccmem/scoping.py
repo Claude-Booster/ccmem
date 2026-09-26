@@ -13,6 +13,12 @@ def resolve_project_root(cwd: str) -> str:
             capture_output=True,
             text=True,
             timeout=5,
+            # Windows: without an explicit stdin, subprocess inherits the parent's
+            # stdin handle, which may be invalid under pytest capture or certain
+            # hook contexts, raising OSError [WinError 6] on spawn. That would make
+            # this fall through to `return cwd` and silently mis-scope memories to
+            # the wrong project. DEVNULL guarantees a valid handle.
+            stdin=subprocess.DEVNULL,
         )
         if r.returncode != 0:
             return cwd
