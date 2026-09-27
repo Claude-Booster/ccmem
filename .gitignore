@@ -1,15 +1,2 @@
-# ccmem local store -- never commit
-.ccmem-test/
-.ccmem/
-mem.db
-*.db
-*.db-wal
-*.db-shm
-
-# Claude Code local settings
-.claude/settings.local.json
-CLAUDE.local.md
-
-__pycache__/
-*.pyc
-.venv/
+# ccmem local identifier block list — real patterns, never pushed
+.githooks/.blocked

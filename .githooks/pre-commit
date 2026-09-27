@@ -1,0 +1,97 @@
+#!/bin/sh
+# Block commits that would expose restricted identifiers.
+#
+# Real patterns live in .githooks/.blocked (gitignored, one grep-BRE pattern per
+# line). This committed hook contains no restricted strings — it only knows the
+# opaque labels below and loads the real patterns at runtime. If .blocked is
+# absent the check is skipped, so a fresh clone is never blocked and this file
+# reveals nothing about what is blocked.
+#
+# Checks, in git's own identity-resolution order:
+#   1. GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL        (env — always override)
+#   2. GIT_COMMITTER_NAME / GIT_COMMITTER_EMAIL  (env — always override)
+#   3. git config user.name / user.email
+#   4. OS fallback: USERNAME / USERDOMAIN / COMPUTERNAME / whoami / hostname
+#      (only when git config is unset — that is when git falls back to OS identity)
+#   5. Staged file content (.githooks/ excluded — it defines the labels)
+#
+# Activate with: git config core.hooksPath .githooks
+
+BLOCKED_FILE="$(git rev-parse --show-toplevel)/.githooks/.blocked"
+
+# BLOCKED_NAME_1 BLOCKED_NAME_2 BLOCKED_EMAIL BLOCKED_ORG BLOCKED_ORG_DOMAIN
+# (opaque labels only — the real values are read from .blocked at runtime)
+
+if [ ! -f "$BLOCKED_FILE" ]; then
+    echo "[pre-commit] WARNING: .githooks/.blocked not found — identifier check skipped."
+    echo "  Copy .githooks/.blocked.example to .githooks/.blocked and fill in your patterns."
+    exit 0
+fi
+
+# Build a grep alternation from non-empty, non-comment lines.
+FORBIDDEN=""
+while IFS= read -r line; do
+    line=$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    case "$line" in
+        ''|\#*) continue ;;
+    esac
+    if [ -z "$FORBIDDEN" ]; then
+        FORBIDDEN="$line"
+    else
+        FORBIDDEN="$FORBIDDEN\|$line"
+    fi
+done < "$BLOCKED_FILE"
+
+[ -z "$FORBIDDEN" ] && exit 0
+
+FAIL=0
+
+_check() {
+    # $1 = label, $2 = value
+    [ -z "$2" ] && return 0
+    if printf '%s' "$2" | grep -iq "$FORBIDDEN"; then
+        printf '[pre-commit] BLOCKED (%s): restricted identifier in commit identity.\n' "$1" >&2
+        printf '  Fix: git config user.name  "Developer"\n' >&2
+        printf '       git config user.email "fredman08@users.noreply.github.com"\n' >&2
+        FAIL=1
+    fi
+}
+
+# 1. GIT_AUTHOR_* / 2. GIT_COMMITTER_* (env overrides embedded verbatim in the commit)
+_check "GIT_AUTHOR_NAME"     "${GIT_AUTHOR_NAME:-}"
+_check "GIT_AUTHOR_EMAIL"    "${GIT_AUTHOR_EMAIL:-}"
+_check "GIT_COMMITTER_NAME"  "${GIT_COMMITTER_NAME:-}"
+_check "GIT_COMMITTER_EMAIL" "${GIT_COMMITTER_EMAIL:-}"
+
+# 3. git config
+CFG_NAME="$(git config user.name 2>/dev/null || true)"
+CFG_EMAIL="$(git config user.email 2>/dev/null || true)"
+_check "user.name"  "$CFG_NAME"
+_check "user.email" "$CFG_EMAIL"
+
+# 4. OS fallback — only when git config is unset (git would then use OS identity)
+if [ -z "$CFG_NAME" ] || [ -z "$CFG_EMAIL" ]; then
+    _check "OS username" "${USERNAME:-$(whoami 2>/dev/null || true)}"
+    _check "OS domain"   "${USERDOMAIN:-}"
+    _check "OS hostname" "${COMPUTERNAME:-$(hostname 2>/dev/null || true)}"
+fi
+
+# 5. Staged file content (.githooks/ excluded — it defines the opaque labels)
+while IFS= read -r file; do
+    [ -z "$file" ] && continue
+    case "$file" in
+        .githooks/*) continue ;;
+    esac
+    if git show ":$file" 2>/dev/null | grep -iq "$FORBIDDEN"; then
+        printf '[pre-commit] BLOCKED (%s): staged content contains a restricted identifier.\n' "$file" >&2
+        FAIL=1
+    fi
+done <<EOF
+$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null)
+EOF
+
+if [ "$FAIL" -ne 0 ]; then
+    printf '\n[pre-commit] Commit blocked. Remove the restricted content and retry.\n' >&2
+    exit 1
+fi
+exit 0
