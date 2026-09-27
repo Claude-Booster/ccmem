@@ -280,7 +280,9 @@ def _measure_spawn_floor_ms(runs: int = 5) -> float:
     times = []
     for _ in range(runs):
         t0 = _time.perf_counter()
-        _sp.run([sys.executable, "-c", "pass"], capture_output=True)
+        # stdin=DEVNULL: inheriting an invalid parent stdin handle (pytest capture,
+        # some hook contexts) raises OSError [WinError 6] on spawn (Windows).
+        _sp.run([sys.executable, "-c", "pass"], capture_output=True, stdin=_sp.DEVNULL)
         times.append((_time.perf_counter() - t0) * 1000)
     return _stat.median(times)
 
