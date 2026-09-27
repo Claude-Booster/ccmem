@@ -1,7 +1,7 @@
 #!/bin/sh
 # Block commits that would expose restricted identifiers.
 #
-# Real patterns live in .githooks/.blocked (gitignored, one grep-BRE pattern per
+# Real patterns live in .githooks/.blocked (gitignored, one grep ERE pattern per
 # line). This committed hook contains no restricted strings — it only knows the
 # opaque labels below and loads the real patterns at runtime. If .blocked is
 # absent the check is skipped, so a fresh clone is never blocked and this file
@@ -17,7 +17,7 @@
 #
 # Activate with: git config core.hooksPath .githooks
 
-BLOCKED_FILE="$(git rev-parse --show-toplevel)/.githooks/.blocked"
+BLOCKED_FILE="$(git rev-parse --show-toplevel 2>/dev/null)/.githooks/.blocked"
 
 # BLOCKED_NAME_1 BLOCKED_NAME_2 BLOCKED_EMAIL BLOCKED_ORG BLOCKED_ORG_DOMAIN
 # (opaque labels only — the real values are read from .blocked at runtime)
@@ -28,7 +28,7 @@ if [ ! -f "$BLOCKED_FILE" ]; then
     exit 0
 fi
 
-# Build a grep alternation from non-empty, non-comment lines.
+# Build an ERE alternation from non-empty, non-comment lines.
 FORBIDDEN=""
 while IFS= read -r line; do
     line=$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -38,21 +38,31 @@ while IFS= read -r line; do
     if [ -z "$FORBIDDEN" ]; then
         FORBIDDEN="$line"
     else
-        FORBIDDEN="$FORBIDDEN\|$line"
+        FORBIDDEN="$FORBIDDEN|$line"
     fi
 done < "$BLOCKED_FILE"
 
 [ -z "$FORBIDDEN" ] && exit 0
+
+# Guard against a malformed pattern in .blocked: a bad ERE makes grep exit >=2,
+# which every `if grep` below would misread as "no match" -> silent false negative.
+# Detect it once and skip loudly rather than pass a leak through unnoticed.
+printf '' | grep -qE "$FORBIDDEN" 2>/dev/null
+if [ "$?" -ge 2 ]; then
+    echo "[pre-commit] WARNING: .githooks/.blocked has an invalid pattern — check skipped." >&2
+    echo "  Fix the pattern (grep ERE syntax) so the guard can run." >&2
+    exit 0
+fi
 
 FAIL=0
 
 _check() {
     # $1 = label, $2 = value
     [ -z "$2" ] && return 0
-    if printf '%s' "$2" | grep -iq "$FORBIDDEN"; then
+    if printf '%s' "$2" | grep -iqE "$FORBIDDEN"; then
         printf '[pre-commit] BLOCKED (%s): restricted identifier in commit identity.\n' "$1" >&2
         printf '  Fix: git config user.name  "Developer"\n' >&2
-        printf '       git config user.email "fredman08@users.noreply.github.com"\n' >&2
+        printf '       git config user.email "you@users.noreply.github.com"\n' >&2
         FAIL=1
     fi
 }
@@ -76,18 +86,19 @@ if [ -z "$CFG_NAME" ] || [ -z "$CFG_EMAIL" ]; then
     _check "OS hostname" "${COMPUTERNAME:-$(hostname 2>/dev/null || true)}"
 fi
 
-# 5. Staged file content (.githooks/ excluded — it defines the opaque labels)
+# 5. Staged file content (.githooks/ excluded — it defines the opaque labels).
+# ACMRT so renames (R) and type-changes (T) are scanned too, not just ACM.
 while IFS= read -r file; do
     [ -z "$file" ] && continue
     case "$file" in
         .githooks/*) continue ;;
     esac
-    if git show ":$file" 2>/dev/null | grep -iq "$FORBIDDEN"; then
+    if git show ":$file" 2>/dev/null | grep -iqE "$FORBIDDEN"; then
         printf '[pre-commit] BLOCKED (%s): staged content contains a restricted identifier.\n' "$file" >&2
         FAIL=1
     fi
 done <<EOF
-$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null)
+$(git diff --cached --name-only --diff-filter=ACMRT 2>/dev/null)
 EOF
 
 if [ "$FAIL" -ne 0 ]; then
