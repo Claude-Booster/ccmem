@@ -18,7 +18,10 @@ def _estimate_tokens(text: str) -> int:
 
 
 def _mem_line(m: Memory) -> str:
-    return f"- [{m.type}] {m.content}"
+    # R9: neutralize HTML-comment delimiters so untrusted content cannot forge or
+    # close the <!-- ccmem --> ... <!-- /ccmem --> block it is wrapped in.
+    safe = m.content.replace("<!--", "<! --").replace("-->", "-- >")
+    return f"- [{m.type}] {safe}"
 
 
 def _count_line(shown: int, total: int, cap: int) -> str:
