@@ -426,6 +426,18 @@ def cmd_capture(args):
         print("WARN: promptId drift — transcript has no promptId on user records; ordinal fallback used")
 
 
+def cmd_pin(args):
+    con = _db(args)
+    val = 0 if getattr(args, "unpin", False) else 1
+    cur = con.execute("UPDATE memories SET pinned=? WHERE id=?", (val, args.id))
+    con.commit()
+    con.close()
+    if cur.rowcount == 0:
+        print(f"Not found: {args.id}", file=sys.stderr)
+        sys.exit(1)
+    print(f"{'Unpinned' if val == 0 else 'Pinned'}: {args.id}")
+
+
 def cmd_generate(args):
     from ccmem.generate import GLOBAL_CAP, PROJECT_CAP, generate_global, generate_project
     from ccmem.scoping import resolve_project_root
@@ -667,6 +679,10 @@ def main():
     inj.add_argument("--dry-run", action="store_true")
     inj.add_argument("--project-root")
 
+    pn = sub.add_parser("pin", help="pin a memory so it survives cap truncation in generate")
+    pn.add_argument("id")
+    pn.add_argument("--unpin", action="store_true", help="remove the pin instead of adding it")
+
     gen = sub.add_parser("generate", help="write memory markdown files for @import")
     gen.add_argument("--global-only", action="store_true",
                      help="write only ~/.claude/ccmem-memories.md")
@@ -687,7 +703,7 @@ def main():
         "add": cmd_add, "list": cmd_list, "show": cmd_show,
         "delete": cmd_delete, "restore": cmd_restore,
         "review": cmd_review, "inject": cmd_inject, "capture": cmd_capture,
-        "generate": cmd_generate, "doctor": cmd_doctor,
+        "pin": cmd_pin, "generate": cmd_generate, "doctor": cmd_doctor,
     }
     if args.cmd not in dispatch:
         p.print_help()
