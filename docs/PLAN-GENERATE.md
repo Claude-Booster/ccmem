@@ -861,7 +861,7 @@ EOF
 
 ## Task 7: Retire dead hook gates; preserve discipline in CLI tests (rev-2 #6)
 
-**Rationale:** `allowManagedHooksOnly: true` (<org> org policy) permanently blocks all ccmem hooks in this environment. Gates that drive hooks via `run_hook` test code that Claude Code will never invoke.
+**Rationale:** `allowManagedHooksOnly: true` (corporate managed-settings policy) permanently blocks all ccmem hooks in this environment. Gates that drive hooks via `run_hook` test code that Claude Code will never invoke.
 
 **Measured baseline (2026-09-26, `run_gates.py --phase 1`):** of the four hook gates, only `gate_hook_contract` is red today (Defender-driven timing on the kill-switch/budget checks). `gate_cache_safety`, `gate_recovery_budget`, and `gate_injection_format` are green — but they exercise blocked-hook code paths, and `gate_injection_format` specifically validates the *old* `<ccmem-memories>` / `[type | age]` format that `generate` abandons. Keeping them green is false confidence: a passing gate over a path Claude Code never runs. Retire all four.
 
