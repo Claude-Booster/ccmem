@@ -401,7 +401,7 @@ interactive session test to verify sigil preservation.
 ## §11 — Python hook startup cost on Windows / OneDrive
 
 `status: verified` — measured 2026-09-23, v2.1.278, Windows 11 Enterprise, Python 3.14.3,
-project directory on OneDrive - <org> (network-backed, sync filter driver active).
+project directory on a corporate OneDrive mount (network-backed, sync filter driver active).
 
 ### Two executables: Windows Store stub vs real Python
 
@@ -448,7 +448,7 @@ clean measurement once the system is freshly rebooted.
 
 The gate uses `subprocess.run([real_py, script], ...)` — a direct list invocation that
 creates one process. Production hooks in settings.json use a command string with spaces
-(the "OneDrive - <org>" path), which requires `shell=True` and spawns `cmd.exe`
+(the "OneDrive - <org>" path with spaces), which requires `shell=True` and spawns `cmd.exe`
 first. This adds a second process creation per hook call.
 
 Measured during active sync (2026-09-23):
