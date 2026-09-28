@@ -27,8 +27,12 @@ def _project_id(root: str) -> str:
 def cmd_add(args):
     from ccmem.redact import redact
     from ccmem.supersession import maybe_supersede
+    from ccmem.scoping import resolve_project_root
     con = _db(args)
-    root = args.project_root or os.getcwd()
+    # Canonicalize to the git repo root so project_id matches what generate and
+    # retrieval compute. Without this, an add from a subdirectory (or a non-git
+    # path form) is stored under a different project_id and silently never shows up.
+    root = resolve_project_root(args.project_root or os.getcwd())
     pid = _project_id(root)
     content = redact(args.content)
     if content != args.content:
@@ -42,7 +46,7 @@ def cmd_add(args):
          args.scope, pid, root, now, "active"),
     )
     con.commit()
-    maybe_supersede(con, mem_id, args.subject, pid)
+    maybe_supersede(con, mem_id, args.subject, pid, args.scope)
     con.close()
     print(f"Added: {mem_id}")
 

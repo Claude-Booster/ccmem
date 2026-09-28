@@ -101,6 +101,34 @@ def test_pinned_survives_truncation_over_newer_unpinned():
             con.close()
 
 
+def test_cli_add_canonicalizes_project_root_from_subdir():
+    """cmd_add must store the git ROOT as project_root, not the cwd subdir, so a
+    project memory added from a subdirectory matches what generate/retrieval compute."""
+    import subprocess, sys
+    from ccmem.scoping import resolve_project_root
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        subprocess.run(["git", "init"], cwd=tmp, capture_output=True, check=True,
+                       stdin=subprocess.DEVNULL)
+        subdir = os.path.join(tmp, "sub", "deep")
+        os.makedirs(subdir)
+        home = os.path.join(tmp, "cchome")
+        os.makedirs(home)
+        env = {**os.environ, "CCMEM_HOME": home, "PYTHONPATH": str(REPO)}
+        r = subprocess.run(
+            [sys.executable, "-m", "ccmem.cli", "add", "--scope", "project",
+             "--content", "subdir add test"],
+            cwd=subdir, env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        assert r.returncode == 0, r.stderr
+        con = sqlite3.connect(os.path.join(home, "mem.db"))
+        try:
+            root = con.execute(
+                "SELECT project_root FROM memories WHERE content='subdir add test'").fetchone()[0]
+        finally:
+            con.close()
+        assert root == resolve_project_root(subdir)          # canonical git root
+        assert os.path.normpath(root) != os.path.normpath(subdir)  # NOT the raw subdir
+
+
 def test_render_neutralizes_ccmem_delimiters_in_content():
     """R9: memory content must not be able to forge/close the ccmem block."""
     from ccmem.generate import _render
