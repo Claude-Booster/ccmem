@@ -10,3 +10,4 @@ mem.db
 
 # Python + local caches
 __pycache__/
+*.egg-info/

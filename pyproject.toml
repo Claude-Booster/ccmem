@@ -1,11 +1,16 @@
 [build-system]
 requires = ["setuptools>=70"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "ccmem"
 version = "0.1.0"
 requires-python = ">=3.11"
+
+[project.scripts]
+# Registers a real `ccmem` command on PATH after `pip install -e .`, so the
+# one-click save-my-notes script works from any project folder (see docs/TRIAL-GUIDE.md).
+ccmem = "ccmem.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
