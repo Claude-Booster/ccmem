@@ -93,3 +93,5 @@ clearly delimited.
 - Cloud sync, multi-user, team-shared memory.
 - Re-indexing the codebase for semantic code search. Different problem.
 - Working with agents other than Claude Code. Not until it's good here first.
+
+@.ccmem/memories.md
