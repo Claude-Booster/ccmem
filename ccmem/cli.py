@@ -398,13 +398,32 @@ def _check_defender_exclusions(
             print("  WARN: Python Lib is a read-only stdlib directory with no user-writable code.")
 
 
+def _latest_transcript(tdir: str) -> str | None:
+    """Most-recently-modified *.jsonl in tdir, or None if there are none."""
+    import glob
+    cands = glob.glob(os.path.join(tdir, "*.jsonl"))
+    if not cands:
+        return None
+    return max(cands, key=os.path.getmtime)
+
+
 def cmd_capture(args):
     from ccmem.capture import capture_transcript, extract_sigil
     from ccmem.killswitch import is_disabled, mark_disabled, session_id_from_transcript
-    from ccmem.paths import resolve_home
+    from ccmem.paths import project_transcript_dir, resolve_home
     from ccmem.transcript import iter_turn_pairs
 
     transcript_path = args.transcript
+    if getattr(args, "latest", False):
+        tdir = project_transcript_dir(os.getcwd())
+        transcript_path = _latest_transcript(tdir)
+        if not transcript_path:
+            print(f"No transcripts found in {tdir}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Latest transcript: {transcript_path}")
+    if not transcript_path:
+        print("Provide a transcript path, or use --latest.", file=sys.stderr)
+        sys.exit(1)
     home = resolve_home()
     session_id = args.session_id or session_id_from_transcript(transcript_path)
 
@@ -696,8 +715,11 @@ def main():
     rev = sub.add_parser("review", help="review pending candidates")
     rev.add_argument("--project-root", help="project root for promoted memories (default: git root of cwd)")
 
-    cap = sub.add_parser("capture", help="capture memories from a transcript JSONL file")
-    cap.add_argument("transcript", help="path to a Claude Code session JSONL transcript")
+    cap = sub.add_parser("capture", help="sweep a transcript's !mem: writes into memory")
+    cap.add_argument("transcript", nargs="?",
+                     help="path to a Claude Code session JSONL transcript (omit with --latest)")
+    cap.add_argument("--latest", action="store_true",
+                     help="use this project's most recent transcript automatically (one action, no path hunting)")
     cap.add_argument("--session-id", help="override auto-detected session ID (default: transcript filename stem)")
 
     inj = sub.add_parser("inject", help="preview injection block")
