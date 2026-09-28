@@ -83,3 +83,20 @@ jobs:
             exit 1
           fi
           echo "No restricted identifiers found."
+
+      # Layered secret scanning (mirrors the local gitleaks pre-commit step):
+      # catches API keys, tokens, private keys, and .env values that the
+      # identifier list above does not know about.
+      - name: gitleaks secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # TruffleHog with verification — confirms whether a detected secret is
+      # still LIVE, separating real emergencies from noise. Scans the tree so it
+      # does not depend on a base/head diff range.
+      - name: TruffleHog verified-secret scan
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          extra_args: --only-verified

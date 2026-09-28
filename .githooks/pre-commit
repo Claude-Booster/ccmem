@@ -86,13 +86,20 @@ if [ -z "$CFG_NAME" ] || [ -z "$CFG_EMAIL" ]; then
     _check "OS hostname" "${COMPUTERNAME:-$(hostname 2>/dev/null || true)}"
 fi
 
-# 5. Staged file content (.githooks/ excluded — it defines the opaque labels).
+# 5. Staged file names AND content (.githooks/ excluded — it defines the labels).
 # ACMRT so renames (R) and type-changes (T) are scanned too, not just ACM.
 while IFS= read -r file; do
     [ -z "$file" ] && continue
     case "$file" in
         .githooks/*) continue ;;
     esac
+    # 5a. The path itself — a name like "frederick.mandap-notes.md" leaks the
+    #     identifier even when the file's content is clean.
+    if printf '%s' "$file" | grep -iqE "$FORBIDDEN"; then
+        printf '[pre-commit] BLOCKED (filename): %s\n' "$file" >&2
+        FAIL=1
+    fi
+    # 5b. File content.
     if git show ":$file" 2>/dev/null | grep -iqE "$FORBIDDEN"; then
         printf '[pre-commit] BLOCKED (%s): staged content contains a restricted identifier.\n' "$file" >&2
         FAIL=1
@@ -100,6 +107,27 @@ while IFS= read -r file; do
 done <<EOF
 $(git diff --cached --name-only --diff-filter=ACMRT 2>/dev/null)
 EOF
+
+# 6. Secret scan (gitleaks) — layered on top of the identifier checks: catches API
+# keys, tokens, private keys and .env values the identifier list does not know about.
+# Fail-safe: exit 1 => leak (block); exit >1 => scanner error (warn, do not block);
+# not installed => warn loudly (a silent no-scan is the exact failure this guards against).
+if command -v gitleaks >/dev/null 2>&1; then
+    _gl_out=$(gitleaks git --staged --no-banner --redact 2>&1)
+    _gl_rc=$?
+    if [ "$_gl_rc" -eq 1 ]; then
+        echo "[pre-commit] BLOCKED: gitleaks detected a secret in staged changes." >&2
+        printf '%s\n' "$_gl_out" | sed 's/^/    /' >&2
+        echo "  Remove the secret, or allowlist it in .gitleaks.toml if it is a false positive." >&2
+        FAIL=1
+    elif [ "$_gl_rc" -gt 1 ]; then
+        echo "[pre-commit] NOTE: gitleaks errored (exit $_gl_rc) — secret scan inconclusive." >&2
+        printf '%s\n' "$_gl_out" | sed 's/^/    /' >&2
+    fi
+else
+    echo "[pre-commit] NOTE: gitleaks not installed — secret scan skipped." >&2
+    echo "  Install: winget install Gitleaks.Gitleaks" >&2
+fi
 
 if [ "$FAIL" -ne 0 ]; then
     printf '\n[pre-commit] Commit blocked. Remove the restricted content and retry.\n' >&2
