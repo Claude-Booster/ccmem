@@ -15,7 +15,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from _common import REPO_ROOT, GateResult, load_config
+from _common import REPO_ROOT, TEST_HOME, GateResult, load_config
 
 # Things that must never survive redaction. Each entry is (label, input, needle)
 # where `needle` is the substring that must be gone from the output.
@@ -118,7 +118,7 @@ def check_live_db(r: GateResult) -> None:
     """If a DB exists, audit its contents. Absence is not a pass."""
     cfg = load_config()
     candidates = [
-        REPO_ROOT / ".ccmem-test" / "mem.db",
+        TEST_HOME / "mem.db",
         Path.home() / ".claude" / "ccmem" / "mem.db",
     ]
     db = next((p for p in candidates if p.exists()), None)

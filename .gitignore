@@ -1,2 +1,12 @@
 # ccmem local identifier block list — real patterns, never pushed
 .githooks/.blocked
+
+# Memory store — local only, never committed (R2/R8). The DB and any generated
+# project memory dir must stay out of git.
+mem.db
+*.db
+.ccmem
+.ccmem-test
+
+# Python + local caches
+__pycache__/

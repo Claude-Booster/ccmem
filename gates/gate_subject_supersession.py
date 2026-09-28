@@ -2,7 +2,7 @@
 """Gate: inserting a memory with a duplicate subject supersedes the older row."""
 from __future__ import annotations
 import sys
-from _common import REPO_ROOT, GateResult
+from _common import REPO_ROOT, TEST_HOME, GateResult
 
 
 def main() -> int:
@@ -18,8 +18,10 @@ def main() -> int:
         return r.report()
     r.ok("ccmem imports")
 
-    home = REPO_ROOT / ".ccmem-test"
-    home.mkdir(exist_ok=True)
+    # Throwaway home in system temp, NOT in the repo tree — a gate that leaves a
+    # .ccmem-test/ behind trips gate_scaffold's "absent at rest" check on the next run.
+    home = TEST_HOME
+    home.mkdir(parents=True, exist_ok=True)
     db = home / "mem.db"
     pid = hashlib.sha256(str(REPO_ROOT).encode()).hexdigest()[:16]
 
