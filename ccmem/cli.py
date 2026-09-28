@@ -639,9 +639,14 @@ def cmd_doctor(args):
     _claude_home = Path(os.path.expanduser("~")) / ".claude"
     _report_tier(_claude_home / "ccmem-memories.md", _claude_home / "CLAUDE.md",
                  "@ccmem-memories.md", "python -m ccmem.cli generate --global-only")
-    _proj = resolve_project_root(os.getcwd())
-    _report_tier(Path(_proj) / ".ccmem" / "memories.md", Path(_proj) / "CLAUDE.md",
-                 "@.ccmem/memories.md", "python -m ccmem.cli generate --project-only")
+    from ccmem.scoping import ScopingError
+    try:
+        _proj = resolve_project_root(os.getcwd())
+        _report_tier(Path(_proj) / ".ccmem" / "memories.md", Path(_proj) / "CLAUDE.md",
+                     "@.ccmem/memories.md", "python -m ccmem.cli generate --project-only")
+    except ScopingError as exc:
+        print(f"  project tier: SCOPING ERROR — {exc}")
+        print("  (cannot resolve the git repo root here; fix git/cwd before generating the project file)")
 
 
 def main():
@@ -710,7 +715,14 @@ def main():
     if args.cmd not in dispatch:
         p.print_help()
         sys.exit(1)
-    dispatch[args.cmd](args)
+    from ccmem.scoping import ScopingError
+    try:
+        dispatch[args.cmd](args)
+    except ScopingError as exc:
+        print(f"ERROR: could not resolve the project root: {exc}", file=sys.stderr)
+        print("Refusing to guess the project scope. Fix git/cwd, or pass --project-root.",
+              file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

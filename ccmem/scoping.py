@@ -4,8 +4,24 @@ import os
 import subprocess
 
 
+class ScopingError(RuntimeError):
+    """The git repo root could not be resolved for a reason OTHER than 'this
+    directory is simply not in a git repository'.
+
+    Callers must treat this loudly. Silently falling back to cwd is how the
+    WinError-6 bug mis-scoped memories to the wrong project: a wrong answer that
+    looked like a right one.
+    """
+
+
 def resolve_project_root(cwd: str) -> str:
-    """Returns the git repo root, worktree-safe. Falls back to cwd."""
+    """Return the git repo root for `cwd` (worktree-safe).
+
+    Returns `cwd` ONLY when `cwd` is definitively not inside a git repository
+    (git ran and said so). Every other failure — git missing, timeout, spawn
+    error, empty/garbled output, or an unexpected non-zero exit — raises
+    ScopingError rather than guessing.
+    """
     try:
         r = subprocess.run(
             ["git", "rev-parse", "--git-common-dir"],
@@ -13,20 +29,30 @@ def resolve_project_root(cwd: str) -> str:
             capture_output=True,
             text=True,
             timeout=5,
-            # Windows: without an explicit stdin, subprocess inherits the parent's
-            # stdin handle, which may be invalid under pytest capture or certain
-            # hook contexts, raising OSError [WinError 6] on spawn. That would make
-            # this fall through to `return cwd` and silently mis-scope memories to
-            # the wrong project. DEVNULL guarantees a valid handle.
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,  # avoid inheriting an invalid stdin handle (WinError 6)
         )
-        if r.returncode != 0:
-            return cwd
-        common = r.stdout.strip()
-        abs_common = os.path.normpath(os.path.join(cwd, common))
-        return os.path.dirname(abs_common)
-    except (OSError, subprocess.TimeoutExpired):
-        return cwd
+    except FileNotFoundError as exc:
+        raise ScopingError(f"git not found while resolving project root for {cwd!r}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ScopingError(f"git timed out while resolving project root for {cwd!r}") from exc
+    except OSError as exc:
+        raise ScopingError(
+            f"git spawn failed while resolving project root for {cwd!r}: {exc}"
+        ) from exc
+
+    if r.returncode != 0:
+        if "not a git repository" in (r.stderr or "").lower():
+            return cwd  # legitimately outside any repo — cwd IS the project root
+        raise ScopingError(
+            f"git rev-parse failed (rc={r.returncode}) for {cwd!r}: "
+            f"{(r.stderr or '').strip()[:200]}"
+        )
+
+    common = r.stdout.strip()
+    if not common:
+        raise ScopingError(f"git returned empty --git-common-dir for {cwd!r}")
+    abs_common = os.path.normpath(os.path.join(cwd, common))
+    return os.path.dirname(abs_common)
 
 
 def project_key(root: str) -> tuple[str, str]:
