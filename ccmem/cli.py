@@ -122,7 +122,12 @@ def cmd_restore(args):
 
 
 def cmd_review(args):
+    from ccmem.scoping import resolve_project_root
     con = _db(args)
+    # Promoted candidates must carry the same canonical project_id that generate and
+    # retrieval compute, or they never surface. (Was hardcoded "manual"/"." — a bug.)
+    root = resolve_project_root(getattr(args, "project_root", None) or os.getcwd())
+    pid = _project_id(root)
     rows = con.execute(
         "SELECT id, session_id, user_turn, assistant_turn, classifier_score "
         "FROM candidates WHERE status='pending' ORDER BY created_at"
@@ -145,7 +150,7 @@ def cmd_review(args):
             con.execute(
                 "INSERT INTO memories (id, type, content, scope, project_id, "
                 "project_root, created_at, status) VALUES (?,?,?,?,?,?,?,?)",
-                (mem_id, "decision", content, "project", "manual", ".", now, "active"),
+                (mem_id, "decision", content, "project", pid, root, now, "active"),
             )
             con.execute("UPDATE candidates SET status='accepted' WHERE id=?", (cid,))
             con.commit()
@@ -561,7 +566,7 @@ def cmd_doctor(args):
     _init = con.execute("SELECT value FROM schema_meta WHERE key='initialized_at'").fetchone()
     _init = _init[0] if _init else "1970-01-01T00:00:00Z"
     _tdir = project_transcript_dir(os.getcwd())
-    _awaiting = 0
+    _awaiting = []
     if os.path.isdir(_tdir):
         for _f in _glob.glob(os.path.join(_tdir, "*.jsonl")):
             try:
@@ -579,8 +584,16 @@ def cmd_doctor(args):
             ).fetchone()
             if _row is not None and _m <= _row[0]:
                 continue
-            _awaiting += 1
-    print(f"\n  transcripts awaiting capture: {_awaiting}  (will sweep on next SessionStart)")
+            _awaiting.append(_f)
+    # No SessionStart hook fires under allowManagedHooksOnly, so list the paths and
+    # the exact command — the user captures manually.
+    print(f"\n  transcripts awaiting capture: {len(_awaiting)}")
+    for _f in sorted(_awaiting, key=os.path.getmtime, reverse=True)[:10]:
+        print(f"    {_f}")
+    if len(_awaiting) > 10:
+        print(f"    ... and {len(_awaiting) - 10} more")
+    if _awaiting:
+        print('  Capture with: python -m ccmem.cli capture "<path above>"')
 
     # Sigil refusals awaiting review.
     _nref = con.execute(
@@ -680,7 +693,8 @@ def main():
     r = sub.add_parser("restore", help="restore a deleted memory")
     r.add_argument("id")
 
-    sub.add_parser("review", help="review pending candidates")
+    rev = sub.add_parser("review", help="review pending candidates")
+    rev.add_argument("--project-root", help="project root for promoted memories (default: git root of cwd)")
 
     cap = sub.add_parser("capture", help="capture memories from a transcript JSONL file")
     cap.add_argument("transcript", help="path to a Claude Code session JSONL transcript")
