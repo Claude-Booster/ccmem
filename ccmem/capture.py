@@ -128,7 +128,7 @@ def _handle_sigil(con, pair, text, scope, session_id, norm_path):
     con.commit()
     if con.total_changes == before:
         return (False, False)  # deduped by content_hash — identical sigil already stored
-    maybe_supersede(con, mem_id, None, pid)
+    maybe_supersede(con, mem_id, None, pid, scope or "project")
     return (True, False)
 
 
