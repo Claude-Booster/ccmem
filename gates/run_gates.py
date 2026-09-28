@@ -39,6 +39,7 @@ REGISTRY = [
     ("gate_overlap_dedup",    1, "memory matching external CLAUDE.md line is suppressed"),
     ("gate_subject_supersession", 1, "duplicate subject supersedes older row"),
     ("gate_worktree_scoping", 1, "resolve_project_root identical for main and linked worktree"),
+    ("gate_scoping_strict",   1, "resolve_project_root raises (never silently returns cwd) on non-'not-a-repo' git failure"),
     # Phase 2+ gates get appended here as they're written. Suggested:
     # ("gate_retrieval_determinism",  2, "same query -> same ranking"),
     # ("gate_embedding_dim",          2, "refuse mixed-dimension reads"),
