@@ -96,7 +96,7 @@ def _handle_sigil(con, pair, text, scope, session_id, norm_path):
     import hashlib
     from ccmem.redact import redact
     from ccmem.supersession import maybe_supersede
-    from ccmem.scoping import project_key, resolve_project_root
+    from ccmem.scoping import ScopingError, project_key, resolve_project_root
     redacted = redact(text)
     if redacted != text:
         con.execute(
@@ -108,7 +108,13 @@ def _handle_sigil(con, pair, text, scope, session_id, norm_path):
         con.commit()
         return (False, True)
     h = hashlib.sha256(redacted.encode("utf-8", "replace")).hexdigest()
-    root = resolve_project_root(pair.cwd or os.getcwd())
+    try:
+        root = resolve_project_root(pair.cwd or os.getcwd())
+    except ScopingError:
+        # Cannot determine the real project root (e.g. the session's cwd is gone,
+        # or git errored). Skip rather than write a mis-scoped memory to the wrong
+        # project — the whole point of the scoping fix.
+        return (False, False)
     pid, _ = project_key(root)
     mem_id = str(uuid.uuid4())
     before = con.total_changes
