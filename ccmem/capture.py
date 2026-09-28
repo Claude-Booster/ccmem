@@ -111,10 +111,12 @@ def _handle_sigil(con, pair, text, scope, session_id, norm_path):
     try:
         root = resolve_project_root(pair.cwd or os.getcwd())
     except ScopingError:
-        # Cannot determine the real project root (e.g. the session's cwd is gone,
-        # or git errored). Skip rather than write a mis-scoped memory to the wrong
-        # project — the whole point of the scoping fix.
-        return (False, False)
+        # A `!mem:` sigil is an EXPLICIT "remember this" — never drop it over a
+        # scoping hiccup (e.g. the session's cwd no longer exists on disk). Fall back
+        # to the raw cwd so the memory is preserved; an imperfect scope beats losing
+        # an instruction the user deliberately gave. (resolve_project_root stays
+        # strict for add/generate/review, where the user is present to see the error.)
+        root = pair.cwd or os.getcwd()
     pid, _ = project_key(root)
     mem_id = str(uuid.uuid4())
     before = con.total_changes

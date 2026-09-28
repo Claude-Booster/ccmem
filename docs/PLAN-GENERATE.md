@@ -26,9 +26,32 @@
 3. **gate_injection_format's concern moved, not deleted.** Its checks (both markers, count line parseable, no partial memory lines, empty→stub) are ported into `gate_budget._check_file`, which already reads the generated files. The gate is still retired in Task 7.
 4. **Scoping test pollution is a real bug** (Task 10). A transient nested `.git` in `gates/` makes `git rev-parse --git-common-dir` resolve to `gates` instead of the repo root. `scoping.py` itself is stateless (verified). Task 10 bisects the suite to find which test leaves that state and fixes the leak. Deferred past Task 3 per the review, but must not survive the plan.
 
-**Deferred flag — `gate_phase1_notes` measures the wrong thing.** It was written for hook-based explicit capture over a week of dogfooding that never happened (hooks got blocked mid-way). It should be rewritten to assess the capture/generate workflow instead. Not changed here; flagged so it gets rewritten before Phase 1 is declared done, rather than sitting red forever or being quietly deleted.
+## Part-3 disposition (decided 2026-09-28)
 
-**Deferred flag — `gate_overlap_dedup` is a fifth hook-driver, and `generate` dropped the dedup feature.** Task 7 retired four gates; `gate_overlap_dedup` also drives the SessionStart hook (`run_hook`) and is green, but it tests DESIGN §Q5's CLAUDE.md/MEMORY.md overlap suppression — which `generate._render` does **not** implement. So the feature the gate protects is currently absent from the live path. Two coupled decisions for the user: (a) should `generate` port the lexical dedup against loaded CLAUDE.md/MEMORY.md, and (b) if so, rewrite `gate_overlap_dedup` to assert on the generated files (like `gate_budget`) instead of driving the hook; if not, retire it too. It does not pollute `.ccmem-test` (uses its own tempdir), so it does not threaten phase-1 stability — hence deferred, not blocking.
+The headline from the scoping audit: **the store is empty** — ccmem is wired,
+verified, and has captured nothing yet. So every remaining follow-up is optimising a
+three-line stub, and the priority is to actually *use* the loop first (see
+`docs/USAGE.md`). Dispositions:
+
+- **DONE — retire `test_hook_*.py`.** The seven hook test files tested hooks that
+  `allowManagedHooksOnly` permanently blocks. Flaky tests for dead code train us to
+  skim test output, which is when a real failure slips past. Removed.
+
+- **DEFER — dedup port (`gate_overlap_dedup`).** With zero memories there is nothing
+  to duplicate, and we don't yet know what a generated file looks like against real
+  CLAUDE.md/MEMORY.md content — so any overlap threshold picked now is guesswork.
+  `gate_overlap_dedup` still drives the (blocked) SessionStart hook and protects
+  DESIGN §Q5 overlap suppression, which `generate._render` does not implement.
+  Revisit once there is real content to measure overlap against; then port the
+  lexical dedup into `generate` and rewrite the gate to assert on generated files.
+  Kept flagged so it is not forgotten. (Does not pollute `.ccmem-test` — its own
+  tempdir — so it does not threaten phase-1 stability.)
+
+- **DEFER — `gate_phase1_notes` rewrite.** It was written for hook-based capture over
+  a week of dogfooding that never happened. Rewrite it to assess the capture/generate
+  workflow — but **after** the workflow has actually been used, not before, or it
+  encodes assumptions about a flow neither of us has run. The notes doc gets written
+  from real use first.
 
 **Note — gate test home moved out of the repo.** `_common.ensure_seeded_db` and `run_hook`'s default `CCMEM_HOME` wrote to `REPO/.ccmem-test`, which re-broke `gate_scaffold` after every run. Both now use `TEST_HOME = <system-temp>/ccmem-gate-test`, so gate runs leave no artifact in the repo tree.
 
