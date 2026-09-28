@@ -129,6 +129,19 @@ def test_cli_add_canonicalizes_project_root_from_subdir():
         assert os.path.normpath(root) != os.path.normpath(subdir)  # NOT the raw subdir
 
 
+def test_latest_transcript_picks_newest_jsonl():
+    from ccmem.cli import _latest_transcript
+    with tempfile.TemporaryDirectory() as tmp:
+        assert _latest_transcript(tmp) is None            # empty dir
+        a = os.path.join(tmp, "a.jsonl"); open(a, "w").close()
+        b = os.path.join(tmp, "b.jsonl"); open(b, "w").close()
+        c = os.path.join(tmp, "c.txt"); open(c, "w").close()   # non-jsonl, newest
+        os.utime(a, (1000, 1000))
+        os.utime(b, (2000, 2000))     # b is the newest .jsonl
+        os.utime(c, (3000, 3000))     # newer, but not .jsonl -> ignored
+        assert _latest_transcript(tmp) == b
+
+
 def test_render_neutralizes_ccmem_delimiters_in_content():
     """R9: memory content must not be able to forge/close the ccmem block."""
     from ccmem.generate import _render

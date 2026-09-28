@@ -190,6 +190,32 @@ user to accept/reject/annotate each. Accepted candidates become structured memor
 This makes Phase 1 "explicit-plus-prompted-review", not "automated capture". That's
 honest. Automated extraction moves to Phase 3 with the LLM worker.
 
+> ### DECISION (2026-09-28): heuristic transcript scoring is not viable — it is dead, not deferred.
+>
+> The lexical flagger was evaluated on a **real 1,959-turn-pair session** (the ccmem
+> build session itself). Result at threshold 4: **48 candidates**, dominated by lexical
+> false positives — the high-frequency triggers (`because`, `actually`, `always`) are
+> how anyone explains anything in a coding session, not signal.
+>
+> Score histogram across all 1,959 pairs:
+> ```
+> score:  0     1    2    3    4    5    6    9
+> pairs:  1790  25   42   54   14   18   15   1
+> ```
+> 91% score 0; the >=4 tail (48 pairs) is mostly noise. Raising the threshold only
+> trades false positives for false negatives (5 → 34, 6 → 16) without changing the
+> shape. Reliably turning a flagged turn into a structured memory needs a model to
+> extract and rank — and the **Phase 3 LLM extractor is permanently unavailable** in
+> this environment. With no model, hand-triaging dozens of mostly-noise candidates per
+> session is friction no one sustains.
+>
+> **Therefore:** the candidate-review path is **not** a viable primary capture mechanism.
+> ccmem's capture surface is **`!mem:`** (explicit, in-session, zero-noise) and
+> **`ccmem add`** (direct). Transcript scanning is retained **only as a sigil-sweep** —
+> `ccmem capture [--latest]` collects `!mem:` writes from a finished session — **not** as
+> a discovery/extraction mechanism. Do not re-propose automatic extraction without a
+> model; this histogram is the evidence.
+
 **PreCompact hook** (`mem_snapshot.py`): fires before the context is compacted.
 Calls `capture_transcript` to score and enqueue any new turn-pairs from the transcript
 not yet in `transcript_progress`. Captured rows are marked `is_pre_compact=1` (reserved
