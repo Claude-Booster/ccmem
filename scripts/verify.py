@@ -38,6 +38,8 @@ USER = "USER_MEM_CHARLIE"
 SUBDIR = "SUBDIR_MEM_DELTA"
 SIGIL = "SIGIL_MEM_ECHO"
 BLOCKED_WORD = "ZZBLOCKEDZZ"
+# A fake key that matches ccmem/redact.py's `sk-ant-[A-Za-z0-9\-_]{12,}` pattern.
+SECRET = "sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFF"
 
 COUNT_RE = re.compile(r"ccmem: (\d+) of (\d+) memories shown \((\d+) token cap\)")
 TOKENS_RE = re.compile(r"~(\d+) / (\d+) tokens")
@@ -236,10 +238,13 @@ class Verifier:
         """A !mem: line in a transcript is swept into memory by `capture`."""
         proj = getattr(self, "proj", None) or self.new_repo("proj")
         tpath = self.sandbox / "session.jsonl"
-        # cwd on the user record must match the repo so the sigil scopes there.
-        # timestamp omitted -> treated as post-install, always captured.
+        # Real Claude Code user records carry a promptId (verified: 2087/2087 on a
+        # live transcript), so the fixture includes one — otherwise capture reports
+        # promptId drift, which would be an artifact of the fixture, not the tool.
+        # cwd must match the repo so the sigil scopes there; timestamp omitted ->
+        # treated as post-install, always captured.
         lines = [
-            {"type": "user", "cwd": str(proj),
+            {"type": "user", "promptId": "p1", "cwd": str(proj),
              "message": {"content": [{"type": "text", "text": f"!mem: {SIGIL} always sweep"}]}},
             {"type": "assistant",
              "message": {"content": [{"type": "text", "text": "noted"}]}},
@@ -247,12 +252,50 @@ class Verifier:
         tpath.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
         cp = self.cli("capture", str(tpath), "--session-id", "verify-sigil", cwd=proj)
         # anchored: "sigil_memories=1" alone would also match =10, =11, ...
+        drift = "promptId drift" in cp.stdout
         self.record("capture reports one sigil memory",
                     re.search(r"sigil_memories=1\b", cp.stdout) is not None,
-                    cp.stdout.strip()[:80])
+                    f"promptId {'ABSENT -> drift warning (ordinal fallback)' if drift else 'present, no drift'}")
         self.cli("generate", "--project-only", cwd=proj)
         ptext = (proj / ".ccmem" / "memories.md").read_text(encoding="utf-8")
         self.record("swept sigil reaches the generated project file", SIGIL in ptext)
+
+    def check_sweep_redaction(self) -> None:
+        """A secret in a !mem: sigil must be redacted on the SWEEP path (distinct
+        code from `add`): never stored, a refusal recorded, surfaced by list --refused.
+        Also checks that scope parsing (!mem[global]:) and redaction COMPOSE."""
+        proj = self.new_repo("redactproj")
+        cases = [
+            ("project sigil", f"!mem: the key is {SECRET}", "verify-redact-proj"),
+            ("global sigil",  f"!mem[global]: the key is {SECRET}", "verify-redact-glob"),
+        ]
+        for label, sigil_line, sess in cases:
+            tpath = self.sandbox / f"redact-{sess}.jsonl"
+            lines = [
+                {"type": "user", "promptId": "p1", "cwd": str(proj),
+                 "message": {"content": [{"type": "text", "text": sigil_line}]}},
+                {"type": "assistant",
+                 "message": {"content": [{"type": "text", "text": "ok"}]}},
+            ]
+            tpath.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+            cp = self.cli("capture", str(tpath), "--session-id", sess, cwd=proj)
+            refused = bool(re.search(r"refusals=1\b", cp.stdout))
+            not_stored = bool(re.search(r"sigil_memories=0\b", cp.stdout))
+            self.record(f"{label} secret refused, not stored",
+                        refused and not_stored, cp.stdout.strip())
+
+        # The secret must never reach a generated @import file.
+        self.cli("generate", cwd=proj)
+        ptext = (proj / ".ccmem" / "memories.md").read_text(encoding="utf-8")
+        gtext = (self.home / ".claude" / "ccmem-memories.md").read_text(encoding="utf-8")
+        self.record("secret absent from generated files",
+                    SECRET not in ptext and SECRET not in gtext)
+
+        # list --refused surfaces the refusals, showing the REDACTED excerpt (not the key).
+        ref = self.cli("list", "--refused", cwd=proj)
+        self.record("list --refused surfaces refusals without leaking the key",
+                    "refused (secret)" in ref.stdout and SECRET not in ref.stdout,
+                    ref.stdout.strip().replace("\n", " ")[:100])
 
     def check_guard_hooks(self) -> None:
         if not shutil.which("git"):
@@ -269,21 +312,29 @@ class Verifier:
         (hooks / ".blocked").write_text(BLOCKED_WORD + "\n", encoding="utf-8")
         self.git("config", "core.hooksPath", ".githooks", cwd=repo)
 
-        # block case: staged content carries the blocked word
-        (repo / "secret.txt").write_text(f"contains {BLOCKED_WORD}\n", encoding="utf-8")
-        self.git("add", "secret.txt", cwd=repo)
-        blocked = self.git("commit", "-m", "should be blocked", cwd=repo)
-        # Assert it failed FOR THE RIGHT REASON, not just any non-zero exit.
+        # BLOCK leg: a file carrying the blocked identifier must be refused. It is
+        # named for what it is and is NEVER committed (the commit is rejected), so it
+        # cannot be mistaken in the output for a leak that got through.
+        leak = repo / "leak_attempt.txt"
+        leak.write_text(f"contains {BLOCKED_WORD}\n", encoding="utf-8")
+        self.git("add", leak.name, cwd=repo)
+        blocked = self.git("commit", "-m", "attempt to commit a restricted identifier", cwd=repo)
         self.record("pre-commit blocks a restricted identifier",
                     blocked.returncode != 0 and "BLOCKED" in (blocked.stderr + blocked.stdout),
-                    "commit must be refused by the guard hook")
+                    f"commit carrying '{leak.name}' refused by the guard hook")
 
-        # allow case: clean content commits fine
-        (repo / "secret.txt").write_text("clean content\n", encoding="utf-8")
-        self.git("add", "secret.txt", cwd=repo)
-        clean = self.git("commit", "-m", "clean commit", cwd=repo)
+        # Discard the blocked file entirely so it cannot ride along into the clean leg.
+        self.git("reset", "--", leak.name, cwd=repo)
+        leak.unlink()
+
+        # CLEAN leg: a benign file with a plainly-innocuous name and no restricted
+        # identifiers commits fine. The committed name reads as harmless in the output.
+        note = repo / "release_notes.txt"
+        note.write_text("Benign release notes. No restricted identifiers here.\n", encoding="utf-8")
+        self.git("add", note.name, cwd=repo)
+        clean = self.git("commit", "-m", "add benign release notes", cwd=repo)
         self.record("clean commit is allowed", clean.returncode == 0,
-                    (clean.stderr or clean.stdout).strip()[:120])
+                    f"benign file '{note.name}' (no blocked identifiers) committed")
 
     def check_design_verdict(self) -> None:
         design = (REPO_ROOT / "docs" / "DESIGN.md")
@@ -341,6 +392,7 @@ class Verifier:
         self.section("gitignore protection", self.check_gitignore)
         self.section("Token cap + truncation", self.check_cap_and_truncation)
         self.section("Sigil capture", self.check_sigil_capture)
+        self.section("Sweep-path redaction", self.check_sweep_redaction)
         self.section("Guard hooks", self.check_guard_hooks)
         self.section("DESIGN verdict recorded", self.check_design_verdict)
         if full:
