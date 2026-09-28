@@ -85,8 +85,16 @@ class Verifier:
         self.git("config", "commit.gpgsign", "false", cwd=root)
         return root
 
+    @staticmethod
+    def _one_line(detail: str) -> str:
+        # Details are often raw CLI stdout/stderr, which can carry newlines (e.g.
+        # capture's "WARN: promptId drift" line). Collapse to a single tidy line so
+        # the checklist never wraps mid-detail.
+        return " ".join(detail.split())
+
     def record(self, name: str, ok: bool, detail: str = "") -> None:
         status = "PASS" if ok else "FAIL"
+        detail = self._one_line(detail)
         self.results.append((name, status, detail))
         line = f"  [{status}] {name}"
         if detail:
@@ -94,6 +102,7 @@ class Verifier:
         print(line, flush=True)
 
     def skip(self, name: str, detail: str) -> None:
+        detail = self._one_line(detail)
         self.results.append((name, "SKIP", detail))
         print(f"  [SKIP] {name}  --  {detail}", flush=True)
 
