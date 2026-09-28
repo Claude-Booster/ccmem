@@ -237,7 +237,9 @@ class Verifier:
         ]
         tpath.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
         cp = self.cli("capture", str(tpath), "--session-id", "verify-sigil", cwd=proj)
-        self.record("capture reports one sigil memory", "sigil_memories=1" in cp.stdout,
+        # anchored: "sigil_memories=1" alone would also match =10, =11, ...
+        self.record("capture reports one sigil memory",
+                    re.search(r"sigil_memories=1\b", cp.stdout) is not None,
                     cp.stdout.strip()[:80])
         self.cli("generate", "--project-only", cwd=proj)
         ptext = (proj / ".ccmem" / "memories.md").read_text(encoding="utf-8")
@@ -262,8 +264,10 @@ class Verifier:
         (repo / "secret.txt").write_text(f"contains {BLOCKED_WORD}\n", encoding="utf-8")
         self.git("add", "secret.txt", cwd=repo)
         blocked = self.git("commit", "-m", "should be blocked", cwd=repo)
-        self.record("pre-commit blocks a restricted identifier", blocked.returncode != 0,
-                    "commit must be refused")
+        # Assert it failed FOR THE RIGHT REASON, not just any non-zero exit.
+        self.record("pre-commit blocks a restricted identifier",
+                    blocked.returncode != 0 and "BLOCKED" in (blocked.stderr + blocked.stdout),
+                    "commit must be refused by the guard hook")
 
         # allow case: clean content commits fine
         (repo / "secret.txt").write_text("clean content\n", encoding="utf-8")
@@ -295,15 +299,25 @@ class Verifier:
             [sys.executable, "gates/run_gates.py", "--phase", "1"],
             cwd=str(REPO_ROOT), env=self.env(), capture_output=True, text=True,
         )
-        failing: set[str] = set()
-        m = re.search(r"gate\(s\) failing: (.+)", cp.stdout)
-        if m:
-            failing = {g.strip() for g in m.group(1).split(",")}
         # gate_phase1_notes is red by design until docs/PHASE1-NOTES.md is written.
         allowed = {"gate_phase1_notes"}
-        ok = cp.returncode == 0 or failing <= allowed
-        detail = "all green" if not failing else f"failing: {', '.join(sorted(failing))}"
-        if failing and failing <= allowed:
+        if cp.returncode == 0:
+            self.record("gate suite passes (phase 1)", True, "all green")
+            return
+        m = re.search(r"gate\(s\) failing: (.+)", cp.stdout)
+        if not m:
+            # Non-zero exit with no parseable failing-list: the runner crashed, hit
+            # the argparse/"no gates" path, or changed its summary wording. Never
+            # tolerate what we could not read — a false green here is the worst
+            # outcome (the whole point is to not let a red suite look green).
+            tail = ((cp.stdout + cp.stderr).strip().splitlines() or [""])[-1]
+            self.record("gate suite passes (phase 1)", False,
+                        f"could not parse run_gates output (rc={cp.returncode}): {tail[:80]}")
+            return
+        failing = {g.strip() for g in m.group(1).split(",")}
+        ok = bool(failing) and failing <= allowed
+        detail = f"failing: {', '.join(sorted(failing))}"
+        if ok:
             detail += " (expected)"
         self.record("gate suite passes (phase 1)", ok, detail)
 
