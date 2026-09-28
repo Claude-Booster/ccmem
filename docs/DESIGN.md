@@ -216,6 +216,53 @@ honest. Automated extraction moves to Phase 3 with the LLM worker.
 > a discovery/extraction mechanism. Do not re-propose automatic extraction without a
 > model; this histogram is the evidence.
 
+### Collapsed shape — DECIDED DIRECTION, pending trial (not yet executed as of 2026-09-28)
+
+Given the decision above, `capture` collapses to a sigil-sweep and the entire
+scoring→candidate→review pipeline becomes dead weight. **This is the agreed target,
+not yet executed** — first a real-use trial: use `!mem:` and `ccmem add`, ignore the
+pipeline entirely. If the sigil gets reached for unprompted after a few sessions, the
+core holds and the deletion below is just bookkeeping. If it doesn't, the problem was
+never the pipeline and deleting it first would have hidden that.
+
+**Deletes:** `_PATTERNS` / `score_turn` / `enqueue_candidate` (scoring); the
+`candidates` table (+ `content_hash` index, `is_pre_compact`); `cmd_review` + its
+subparser; the scoring/threshold/drift branch in `capture_transcript`; doctor's
+`candidates [pending]` line; the review/scoring/candidate tests.
+
+**Keeps:** `extract_sigil` + `_handle_sigil` (redact → `content_hash` dedup →
+`sigil_refusals`), `ccmem list --refused`, `iter_turn_pairs`, the `!mem:off` kill
+switch.
+
+**Drops the HWM too (`transcript_progress`) — stateless sweep.** It is not needed for
+correctness (sigils are idempotent via `memories.content_hash`), the efficiency it buys
+is negligible at millisecond scan cost, and the doctor "awaiting" list is meaningless in
+a sigil-only world (it is mtime-based, so it would flag every session regardless of
+whether one holds a sigil). The "was this session already swept?" question is moot —
+re-sweeping writes nothing new, and "did my `!mem:` land?" is answered by `ccmem list` /
+the generated file, not by sweep-state. Dropping it removes a class of the project's
+**dominant failure mode: state quietly saying something false** — WinError-6 scoping,
+the bogus `project_id` in review, the `initialized_at` capture artifact. Every one was
+stored state lying without complaining. Stateless is one less thing that can.
+
+**Collapsed `capture_transcript` (~20 lines):**
+```python
+def sweep_sigils(con, transcript_path, session_id):
+    for pair in iter_turn_pairs(transcript_path):
+        text, scope, _ = extract_sigil(pair.user_turn)
+        if text is None:
+            continue
+        if text.strip().lower() == "off":
+            mark_disabled(...); break
+        _handle_sigil(con, pair, text, scope, session_id, norm)  # redact, dedup, refusal
+```
+
+Cost: one focused PR, net deletion (~-250 lines) across `capture.py`, `cli.py` (review +
+doctor), `db.py` (DROP `candidates`, DROP `transcript_progress`, schema_version bump +
+migration), `gate_schema_contract.py` (drop both tables from the contract), `DESIGN.md`
+(schema + Q6), `USAGE.md` (loop becomes `!mem:`/`add` → `capture --latest` → `generate`,
+no review), and test cleanup (sigil tests stay).
+
 **PreCompact hook** (`mem_snapshot.py`): fires before the context is compacted.
 Calls `capture_transcript` to score and enqueue any new turn-pairs from the transcript
 not yet in `transcript_progress`. Captured rows are marked `is_pre_compact=1` (reserved
