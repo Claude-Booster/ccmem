@@ -50,8 +50,8 @@ FAILED=0
 while read -r local_ref local_sha remote_ref remote_sha; do
     [ "$local_sha" = "$ZERO" ] && continue  # deletes
 
-    # Ref name itself (branch/tag) — a name like "frederick-fix" leaks the
-    # identifier into the remote even when every commit and file is clean.
+    # Ref name itself (branch/tag) — a branch or tag name can carry an identifier
+    # into the remote even when every commit and file is clean.
     ref_name=$(printf '%s' "$remote_ref" | sed 's|^refs/[^/]*/||')
     if printf '%s' "$ref_name" | grep -iqE "$FORBIDDEN"; then
         echo "[pre-push] BLOCKED: pushed ref name contains a restricted identifier." >&2

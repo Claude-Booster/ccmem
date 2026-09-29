@@ -93,8 +93,8 @@ while IFS= read -r file; do
     case "$file" in
         .githooks/*) continue ;;
     esac
-    # 5a. The path itself — a name like "frederick.mandap-notes.md" leaks the
-    #     identifier even when the file's content is clean.
+    # 5a. The path itself — a filename can carry an identifier even when the
+    #     file's content is clean, so scan the staged path too.
     if printf '%s' "$file" | grep -iqE "$FORBIDDEN"; then
         printf '[pre-commit] BLOCKED (filename): %s\n' "$file" >&2
         FAIL=1
