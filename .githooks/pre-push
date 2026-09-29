@@ -49,6 +49,17 @@ FAILED=0
 # stdin: <local-ref> <local-sha> <remote-ref> <remote-sha>
 while read -r local_ref local_sha remote_ref remote_sha; do
     [ "$local_sha" = "$ZERO" ] && continue  # deletes
+
+    # Ref name itself (branch/tag) — a branch or tag name can carry an identifier
+    # into the remote even when every commit and file is clean.
+    ref_name=$(printf '%s' "$remote_ref" | sed 's|^refs/[^/]*/||')
+    if printf '%s' "$ref_name" | grep -iqE "$FORBIDDEN"; then
+        echo "[pre-push] BLOCKED: pushed ref name contains a restricted identifier." >&2
+        printf '  Ref: %s\n' "$remote_ref" >&2
+        echo "  Rename the branch/tag with a clean name, then retry." >&2
+        FAILED=1
+    fi
+
     obj_type=$(git cat-file -t "$local_sha" 2>/dev/null)
 
     if [ "$obj_type" = "tag" ]; then
