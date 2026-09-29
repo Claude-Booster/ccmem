@@ -83,3 +83,14 @@ jobs:
             exit 1
           fi
           echo "No restricted identifiers found."
+
+      # Server-side secret scanning. gitleaks runs LOCALLY in pre-commit; here we
+      # use TruffleHog (free for organizations, unlike gitleaks-action which needs
+      # a paid org license) with verification — it confirms whether a detected
+      # secret is still LIVE, separating real emergencies from noise. Scans the
+      # tree so it does not depend on a base/head diff range.
+      - name: TruffleHog verified-secret scan
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          extra_args: --only-verified
