@@ -1,5 +1,0 @@
-{"type":"user","promptId":"p1","cwd":"C:\\proj","message":{"content":[{"type":"text","text":"hello"}]}}
-{"type":"assistant","apiBlockIndex":0,"message":{"content":[{"type":"text","text":"hi there"}]}}
-{"type":"user","promptId":"p2","cwd":"C:\\proj","message":{"content":[{"type":"text","text":"we decided to use X instead of Y"}]}}
-{"type":"assistant","apiBlockIndex":0,"message":{"content":[{"type":"text","text":"the approach is X"}]}}
-{"type":"assistant","apiBlockIndex":1,"message":{"content":[{"type":"text","text":" because it is simpler"}]}}

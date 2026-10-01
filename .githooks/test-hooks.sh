@@ -29,6 +29,16 @@ git config commit.gpgsign false
 unstage(){ git rm --cached -f "$1" >/dev/null 2>&1; rm -f "$1"; }
 precommit(){ sh .githooks/pre-commit >/dev/null 2>&1; }
 
+# For the fail-closed tests: simulate "no scanner" by stripping just gitleaks's
+# directory from PATH (keeping git/grep/sed). If gitleaks is not installed,
+# absence is the real state and the reduced PATH equals PATH.
+GLDIR=""
+if command -v gitleaks >/dev/null 2>&1; then GLDIR="$(dirname "$(command -v gitleaks)")"; fi
+reduced_path(){
+  if [ -n "$GLDIR" ]; then printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$GLDIR" | paste -sd ':' -; else printf '%s' "$PATH"; fi
+}
+RP="$(reduced_path)"
+
 # 1. content leak -> blocked
 printf 'hello ZZBLOCKNAMEZZ world\n' > c.txt; git add c.txt
 precommit && no "content leak blocked" || ok "content leak blocked"; unstage c.txt
@@ -56,6 +66,31 @@ rm -f m.txt
 printf '[unclosed(char\n' > .githooks/.blocked
 printf 'clean\n' > g.txt; git add g.txt
 precommit && ok "invalid-pattern guard stays fail-safe (exit 0)" || no "invalid-pattern guard stays fail-safe"; unstage g.txt
+
+# Restore a valid pattern file for the remaining tests.
+printf 'ZZBLOCKNAMEZZ\nzzblock\\.user@example\\.com\n' > .githooks/.blocked
+
+# 7. the guard's OWN source is scanned (self-exclusion fix: no blanket .githooks/* skip)
+printf 'leak ZZBLOCKNAMEZZ sitting in a hook source file\n' > .githooks/extra.sh
+git add .githooks/extra.sh
+precommit && no "hook-source leak blocked" || ok "hook-source leak blocked"; unstage .githooks/extra.sh
+
+# 8. the pattern-definition file IS still excluded (narrow, intentional)
+printf 'ZZBLOCKNAMEZZ\n' > .githooks/.blocked.example
+git add -f .githooks/.blocked.example
+precommit && ok ".blocked.example excluded from content scan" || no ".blocked.example excluded from content scan"
+unstage .githooks/.blocked.example
+
+# 9. no secret scanner + no override -> fail CLOSED (clean content, so only the
+#    missing scanner can cause the block)
+printf 'totally clean\n' > s.txt; git add s.txt
+( PATH="$RP"; export PATH; sh .githooks/pre-commit >/dev/null 2>&1 ) \
+    && no "scanner-absent fails closed" || ok "scanner-absent fails closed"; unstage s.txt
+
+# 10. no secret scanner + explicit override -> allowed
+printf 'totally clean\n' > s2.txt; git add s2.txt
+( PATH="$RP"; export PATH; CCMEM_ALLOW_NO_SCANNER=1 sh .githooks/pre-commit >/dev/null 2>&1 ) \
+    && ok "scanner-absent override allows" || no "scanner-absent override allows"; unstage s2.txt
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
