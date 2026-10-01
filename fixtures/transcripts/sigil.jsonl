@@ -1,2 +1,0 @@
-{"type":"user","promptId":"p1","cwd":"C:\\proj","message":{"content":[{"type":"text","text":"!mem: always run gates before commit"}]}}
-{"type":"assistant","apiBlockIndex":0,"message":{"content":[{"type":"text","text":"noted"}]}}

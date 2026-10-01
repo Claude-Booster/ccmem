@@ -1,8 +1,0 @@
-{
-  "session_id": "0000-test-session",
-  "transcript_path": "fixtures/transcript.jsonl",
-  "cwd": ".",
-  "hook_event_name": "UserPromptSubmit",
-  "prompt": "should we rate limit in the app layer or with a trigger?",
-  "prompt_id": "ec52e4d3-0131-445c-ab70-a8672c2b10a1"
-}
