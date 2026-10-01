@@ -101,10 +101,11 @@ while read -r local_ref local_sha remote_ref remote_sha; do
         FAILED=1
     fi
 
-    # File content of the pushed TIP tree (.githooks/ excluded).
-    if git grep -iqE "$FORBIDDEN" "$local_sha" -- ':!.githooks' 2>/dev/null; then
+    # File content of the pushed TIP tree. The hook's own sources are scanned;
+    # only the two pattern-definition files are excluded (they hold pattern text).
+    if git grep -iqE "$FORBIDDEN" "$local_sha" -- ':!.githooks/.blocked' ':!.githooks/.blocked.example' 2>/dev/null; then
         echo "[pre-push] BLOCKED: pushed file content contains a restricted identifier (tip $local_ref)." >&2
-        echo "  Find it: git grep -inE '<pattern>' $local_sha -- ':!.githooks'" >&2
+        echo "  Find it: git grep -inE '<pattern>' $local_sha -- ':!.githooks/.blocked' ':!.githooks/.blocked.example'" >&2
         FAILED=1
     fi
 done
