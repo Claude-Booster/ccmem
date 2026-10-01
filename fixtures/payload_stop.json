@@ -1,8 +1,0 @@
-{
-  "session_id": "0000-test-session",
-  "transcript_path": "fixtures/transcript.jsonl",
-  "cwd": ".",
-  "hook_event_name": "Stop",
-  "stop_hook_active": false,
-  "last_assistant_message": "Done -- trigger added, patch only."
-}
