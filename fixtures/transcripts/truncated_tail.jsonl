@@ -1,3 +1,0 @@
-{"type":"user","promptId":"p1","cwd":"C:\\proj","message":{"content":[{"type":"text","text":"hello"}]}}
-{"type":"assistant","apiBlockIndex":0,"message":{"content":[{"type":"text","text":"hi"}]}}
-{"type":"user","promptId":"p2","cwd":"C:\\proj","message":{"content":[{"type":"text","tex
