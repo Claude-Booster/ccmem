@@ -57,10 +57,12 @@ jobs:
 
           fail=0
 
-          # 1) Added lines in changed files (exclude the hook dir and this workflow).
+          # 1) Added lines in changed files. The hook sources ARE scanned; only the
+          #    pattern-definition files are excluded (they hold pattern text), matching
+          #    the local hooks. Scanning the workflow itself too (no self-exclusion).
           files="$(git diff --name-only "$base" "$head" -- . \
-                    ':(exclude).githooks/*' \
-                    ':(exclude).github/workflows/verify.yml' || true)"
+                    ':(exclude).githooks/.blocked' \
+                    ':(exclude).githooks/.blocked.example' || true)"
           for f in $files; do
             [ -f "$f" ] || continue
             if git diff "$base" "$head" -- "$f" \
