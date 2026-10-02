@@ -3,3 +3,7 @@
 
 # Local session config — never commit
 .claude/
+
+# Superpowers local working artifacts (SDD review packages, progress logs) —
+# untracked, contain machine-specific paths; never commit
+.superpowers/
