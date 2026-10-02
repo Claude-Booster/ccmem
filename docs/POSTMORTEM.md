@@ -202,3 +202,47 @@ undocumented internally, and it **changed twice during this project**. A tool
 that writes to it is building on moving ground — which is exactly the kind of
 silent-drift exposure Finding 1 is about. Read the format's exclusions before
 trusting them.
+
+---
+
+## v2 — attempted and stopped before any code (2026-10-02)
+
+A rebuild was proposed: persistent memory that *supplements* native auto-memory
+instead of duplicating it. It was stopped before a line of code was written.
+
+**`permissions.deny` cannot be the capture mechanism.** A deny rule is a veto on a
+proposed tool call — purely *subtractive*. It has no execution step, no return
+value, no write path, and no channel into the prompt. Capture and injection are
+*additive*. So the v1 capture constraint is **unchanged**: hooks blocked, no API
+key, heuristics dead — nothing new captures automatically, and any v2 that
+maintains its own store dies exactly the way v1 did. The only surviving shape is a
+*read-only curator of the native store*, which raised the real question — are
+native memory's gaps actually biting?
+
+**That question was answered by reading, not by building the tool that reads.**
+The native stores were inspected by hand across ~20 projects. Every `MEMORY.md`
+index sits far under the startup-load window; the largest (CCGate) is **17 lines /
+5.2 KB against a 200-line / 25.6 KB limit**. Gaps 1–2 (token budget, ranked
+retrieval) are *structurally incapable* of biting at that size. Gaps 3–4
+(supersession, scoping) appear only as duplicate or stale entries in abandoned
+per-directory stores — and because native memory is per-directory, those are
+untidiness in dead directories, not wrong facts in live sessions.
+
+**Verdict: native memory is sufficient. The gaps are scale failures that have not
+arrived.** Building the curator now would be building for a problem that does not
+exist — the v1 mistake. Not built. Cost of reaching this answer: **one day, versus
+three weeks** for the same class of answer in v1.
+
+**Sensitivity, stated accurately** (correcting a looser claim made during the
+inspection): the hand-read found no real secret — only a placeholder key. Several
+stores do hold the author's real name, employer, and git identity. Anthropic does
+not transmit auto-memory off the machine — but that is a property of the memory
+*system's design*, not of the disk. These files live on a managed laptop with a
+cloud-synced profile, and `~/.claude/projects/` also holds transcripts. What the
+machine does with that directory is a separate question from what Anthropic does.
+Not urgent, not a finding — recorded as what is actually true.
+
+**Why the method is the point.** The question was settled by reading the files
+rather than building the thing that reads them — the same discipline as the five
+drift findings above, applied *before* the work instead of after. Reading the
+exclusion list first is cheaper than discovering the drift later.
