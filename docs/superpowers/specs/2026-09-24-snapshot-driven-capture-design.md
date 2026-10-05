@@ -160,7 +160,7 @@ longer *depends* on it.
 
 **Path normalization is mandatory** (change #4): a `TEXT PRIMARY KEY` is
 case-sensitive, but Windows paths are not, and this machine also has 8.3 short paths
-live — so `C:\Users\...`, `c:\users\...`, and `C:\Users\<short-name>\...` are three
+live — so `C:\Users\...`, `c:\users\...`, and the 8.3 short form `C:\Users\<short-name>\...` are three
 spellings of one file that would otherwise create three `transcript_progress` rows
 with three independent marks (the 2nd and 3rd re-scoring everything). Every
 `transcript_path` is normalized before use and stored normalized:
