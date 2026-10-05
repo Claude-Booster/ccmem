@@ -60,10 +60,11 @@ jobs:
           # 1) Added lines in changed files. The hook sources ARE scanned; only the
           #    pattern-definition files are excluded (they hold pattern text), matching
           #    the local hooks. Scanning the workflow itself too (no self-exclusion).
-          files="$(git diff --name-only "$base" "$head" -- . \
-                    ':(exclude).githooks/.blocked' \
-                    ':(exclude).githooks/.blocked.example' || true)"
-          for f in $files; do
+          # NUL-delimited so paths with spaces survive intact (git -z also
+          # disables quotePath). Process substitution keeps the loop in THIS
+          # shell so `fail=1` persists — a pipe would run the loop in a
+          # subshell and silently lose the flag.
+          while IFS= read -r -d '' f; do
             [ -f "$f" ] || continue
             if git diff "$base" "$head" -- "$f" \
                  | grep -E '^\+[^+]' \
@@ -71,7 +72,9 @@ jobs:
               echo "::error file=$f::restricted identifier found in added lines"
               fail=1
             fi
-          done
+          done < <(git diff -z --name-only "$base" "$head" -- . \
+                    ':(exclude).githooks/.blocked' \
+                    ':(exclude).githooks/.blocked.example')
 
           # 2) Commit author/committer identity across the range.
           if git log --format='%an %ae|%cn %ce' "$base..$head" \
@@ -92,7 +95,7 @@ jobs:
       # secret is still LIVE, separating real emergencies from noise. Scans the
       # tree so it does not depend on a base/head diff range.
       - name: TruffleHog verified-secret scan
-        uses: trufflesecurity/trufflehog@main
+        uses: trufflesecurity/trufflehog@4dd8831c5f12599465d4d45c3c447b4018a34c85  # v3.97.9
         with:
           path: ./
           extra_args: --only-verified
