@@ -144,6 +144,16 @@ else
     FAIL=1
 fi
 
+# 7. Project-specific extension point. A repo may add a .githooks/pre-commit.local
+# for its own checks (lint, typecheck, ...). It is NOT part of the canonical
+# committed set, so it SURVIVES setup-commit-guard syncs that overwrite this file.
+# Invoked via `sh` (no exec-bit dependency — portable on Windows). Runs last; a
+# non-zero exit blocks the commit, same as the checks above.
+_LOCAL_HOOK="$(git rev-parse --show-toplevel 2>/dev/null)/.githooks/pre-commit.local"
+if [ -f "$_LOCAL_HOOK" ]; then
+    sh "$_LOCAL_HOOK" || FAIL=1
+fi
+
 if [ "$FAIL" -ne 0 ]; then
     printf '\n[pre-commit] Commit blocked. Remove the restricted content and retry.\n' >&2
     exit 1
