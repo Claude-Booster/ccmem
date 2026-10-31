@@ -25,7 +25,7 @@ gitleaks/TruffleHog layered on for secrets (`.github/workflows/verify.yml`
 mirrors the identifier scan server-side). Real patterns live in
 `.githooks/.blocked`, which is gitignored and never committed; the hooks carry
 only opaque labels. The secret scan is fail-closed — a missing scanner refuses
-the commit unless `CCMEM_ALLOW_NO_SCANNER=1` is set. Copy
+the commit unless `ALLOW_NO_SCANNER=1` is set. Copy
 `.githooks/.blocked.example` to `.githooks/.blocked` and fill in real values
 before relying on it.
 
