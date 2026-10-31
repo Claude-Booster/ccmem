@@ -95,7 +95,7 @@ jobs:
       # secret is still LIVE, separating real emergencies from noise. Scans the
       # tree so it does not depend on a base/head diff range.
       - name: TruffleHog verified-secret scan
-        uses: trufflesecurity/trufflehog@4dd8831c5f12599465d4d45c3c447b4018a34c85  # v3.97.9
+        uses: trufflesecurity/trufflehog@31ce31ee1abbcc7dc8eee5764c17121c3044c8b2  # v3.99.7
         with:
           path: ./
           extra_args: --only-verified
